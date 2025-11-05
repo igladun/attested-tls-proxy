@@ -1,15 +1,11 @@
 use clap::{Parser, Subcommand};
 use std::{fs::File, net::SocketAddr};
-use tokio_rustls::rustls::{
-    pki_types::{CertificateDer, PrivateKeyDer},
-    ClientConfig, RootCertStore, ServerConfig,
-};
+use tokio_rustls::rustls::pki_types::{CertificateDer, PrivateKeyDer};
 
 use attested_tls_proxy::{ProxyClient, ProxyServer};
 
 #[derive(Parser, Debug, Clone)]
 #[clap(version, about, long_about = None)]
-#[clap(about = "Peer to peer filesharing")]
 struct Cli {
     #[clap(subcommand)]
     command: CliCommand,
@@ -43,19 +39,9 @@ async fn main() {
             server_name,
             server_address,
         } => {
-            let root_store =
-                RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-            let client_config = ClientConfig::builder()
-                .with_root_certificates(root_store)
-                .with_no_client_auth();
-
-            let client = ProxyClient::new(
-                client_config.into(),
-                cli.address,
-                server_address,
-                server_name.try_into().unwrap(),
-            )
-            .await;
+            let client =
+                ProxyClient::new(cli.address, server_address, server_name.try_into().unwrap())
+                    .await;
 
             loop {
                 client.accept().await.unwrap();
@@ -64,18 +50,7 @@ async fn main() {
         CliCommand::Server { client_address } => {
             let cert_chain = load_certs_pem("certs.pem").unwrap();
             let key = load_private_key_pem("key.pem");
-            let server_config = ServerConfig::builder()
-                .with_no_client_auth()
-                .with_single_cert(cert_chain.clone(), key)
-                .expect("Failed to create rustls server config");
-
-            let server = ProxyServer::new(
-                cert_chain,
-                server_config.into(),
-                cli.address,
-                client_address,
-            )
-            .await;
+            let server = ProxyServer::new(cert_chain, key, cli.address, client_address).await;
 
             loop {
                 server.accept().await.unwrap();
