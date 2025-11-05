@@ -3,7 +3,6 @@ mod attestation;
 pub use attestation::{AttestationPlatform, MockAttestation, NoAttestation};
 
 use std::{net::SocketAddr, sync::Arc};
-use thiserror::Error;
 use tokio::io::{self, AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, ToSocketAddrs};
 use tokio_rustls::rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
@@ -118,7 +117,9 @@ impl<L: AttestationPlatform, R: AttestationPlatform> ProxyServer<L, R> {
                 )
                 .unwrap();
 
-            let attestation = local_attestation_platform.create_attestation(&cert_chain, exporter);
+            let attestation = local_attestation_platform
+                .create_attestation(&cert_chain, exporter)
+                .unwrap();
             let attestation_length_prefix = length_prefix(&attestation);
 
             tls_stream
@@ -135,9 +136,9 @@ impl<L: AttestationPlatform, R: AttestationPlatform> ProxyServer<L, R> {
             let mut buf = vec![0; length];
             tls_stream.read_exact(&mut buf).await.unwrap();
 
-            if !remote_attestation_platform.verify_attestation(buf, &cert_chain, exporter) {
-                panic!("Cannot verify attestation");
-            };
+            remote_attestation_platform
+                .verify_attestation(buf, &cert_chain, exporter)
+                .unwrap();
 
             let outbound = TcpStream::connect(target).await.unwrap();
 
@@ -252,11 +253,14 @@ impl<L: AttestationPlatform, R: AttestationPlatform> ProxyClient<L, R> {
             let mut buf = vec![0; length];
             tls_stream.read_exact(&mut buf).await.unwrap();
 
-            if !remote_attestation_platform.verify_attestation(buf, &cert_chain, exporter) {
-                panic!("Cannot verify attestation");
-            };
+            remote_attestation_platform
+                .verify_attestation(buf, &cert_chain, exporter)
+                .unwrap();
 
-            let attestation = local_attestation_platform.create_attestation(&cert_chain, exporter);
+            let attestation = local_attestation_platform
+                .create_attestation(&cert_chain, exporter)
+                .unwrap();
+
             let attestation_length_prefix = length_prefix(&attestation);
 
             tls_stream
@@ -285,17 +289,6 @@ impl<L: AttestationPlatform, R: AttestationPlatform> ProxyClient<L, R> {
 fn length_prefix(input: &[u8]) -> [u8; 4] {
     let len = input.len() as u32;
     len.to_be_bytes()
-}
-
-/// An error when generating an attestation
-#[derive(Error, Debug)]
-pub enum AttestationError {
-    #[error("Certificate chain is empty")]
-    NoCertificate,
-    #[error("X509 parse: {0}")]
-    X509Parse(#[from] x509_parser::asn1_rs::Err<x509_parser::error::X509Error>),
-    #[error("X509: {0}")]
-    X509(#[from] x509_parser::error::X509Error),
 }
 
 #[cfg(test)]
