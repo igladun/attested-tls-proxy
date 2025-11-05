@@ -45,6 +45,7 @@ impl ProxyServer {
         server
     }
 
+    /// Start with preconfigured TLS
     pub async fn new_with_tls_config(
         cert_chain: Vec<CertificateDer<'static>>,
         server_config: Arc<ServerConfig>,
@@ -82,6 +83,14 @@ impl ProxyServer {
                     EXPORTER_LABEL,
                     None, // context
                 )
+                .unwrap();
+
+            let attestation = attestation_platform.create_attestation(&cert_chain, exporter);
+            let attestation_length_prefix = length_prefix(&attestation);
+
+            tls_stream
+                .write_all(&attestation_length_prefix)
+                .await
                 .unwrap();
 
             tls_stream
@@ -172,7 +181,12 @@ impl ProxyClient {
                 .unwrap();
 
             let cert_chain = server_connection.peer_certificates().unwrap().to_owned();
-            let mut buf = [0; 64];
+
+            let mut length_bytes = [0; 4];
+            tls_stream.read_exact(&mut length_bytes).await.unwrap();
+            let length: usize = u32::from_be_bytes(length_bytes).try_into().unwrap();
+
+            let mut buf = vec![0; length];
             tls_stream.read_exact(&mut buf).await.unwrap();
 
             if !attestation_platform.verify_attestation(buf, &cert_chain, exporter) {
@@ -196,7 +210,7 @@ pub trait AttestationPlatform {
 
     fn verify_attestation(
         &self,
-        input: [u8; 64],
+        input: Vec<u8>,
         cert_chain: &[CertificateDer<'_>],
         exporter: [u8; 32],
     ) -> bool;
@@ -218,7 +232,7 @@ impl AttestationPlatform for MockAttestation {
     /// Mocks verifying an attestation
     fn verify_attestation(
         &self,
-        input: [u8; 64],
+        input: Vec<u8>,
         cert_chain: &[CertificateDer<'_>],
         exporter: [u8; 32],
     ) -> bool {
@@ -229,6 +243,11 @@ impl AttestationPlatform for MockAttestation {
 
         input == quote_input
     }
+}
+
+fn length_prefix(input: &[u8]) -> [u8; 4] {
+    let len = input.len() as u32;
+    len.to_be_bytes()
 }
 
 /// Given a certificate chain, get the [Sha256] hash of the public key of the leaf certificate
