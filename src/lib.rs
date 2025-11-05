@@ -57,7 +57,7 @@ impl<L: AttestationPlatform, R: AttestationPlatform> ProxyServer<L, R> {
             .with_single_cert(cert_chain.clone(), key)
             .expect("Failed to create rustls server config");
 
-        let server = Self::new_with_tls_config(
+        Self::new_with_tls_config(
             cert_chain,
             server_config.into(),
             local,
@@ -65,9 +65,7 @@ impl<L: AttestationPlatform, R: AttestationPlatform> ProxyServer<L, R> {
             local_attestation_platform,
             remote_attestation_platform,
         )
-        .await;
-
-        server
+        .await
     }
 
     /// Start with preconfigured TLS
@@ -184,7 +182,7 @@ impl<L: AttestationPlatform, R: AttestationPlatform> ProxyClient<L, R> {
             .with_root_certificates(root_store)
             .with_no_client_auth();
 
-        let client = Self::new_with_tls_config(
+        Self::new_with_tls_config(
             client_config.into(),
             address,
             server_address,
@@ -192,8 +190,7 @@ impl<L: AttestationPlatform, R: AttestationPlatform> ProxyClient<L, R> {
             local_attestation_platform,
             remote_attestation_platform,
         )
-        .await;
-        client
+        .await
     }
 
     pub async fn new_with_tls_config(
@@ -215,7 +212,12 @@ impl<L: AttestationPlatform, R: AttestationPlatform> ProxyClient<L, R> {
         Self {
             inner,
             connector,
+<<<<<<< HEAD
             target: target.into(),
+=======
+            listener,
+            target,
+>>>>>>> main
             target_name,
         }
     }
