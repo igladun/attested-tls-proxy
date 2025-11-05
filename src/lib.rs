@@ -39,10 +39,7 @@ impl ProxyServer {
             .with_single_cert(cert_chain.clone(), key)
             .expect("Failed to create rustls server config");
 
-        let server =
-            Self::new_with_tls_config(cert_chain, server_config.into(), local, target).await;
-
-        server
+        Self::new_with_tls_config(cert_chain, server_config.into(), local, target).await
     }
 
     /// Start with preconfigured TLS
@@ -133,10 +130,7 @@ impl ProxyClient {
             .with_root_certificates(root_store)
             .with_no_client_auth();
 
-        let client =
-            Self::new_with_tls_config(client_config.into(), address, server_address, server_name)
-                .await;
-        client
+        Self::new_with_tls_config(client_config.into(), address, server_address, server_name).await
     }
 
     pub async fn new_with_tls_config(
@@ -151,7 +145,7 @@ impl ProxyClient {
         Self {
             connector,
             listener,
-            target: target.into(),
+            target,
             target_name,
             attestation_platform: MockAttestation,
         }
