@@ -1,6 +1,7 @@
 mod attestation;
 
 pub use attestation::{AttestationPlatform, MockAttestation, NoAttestation};
+use tokio_rustls::rustls::server::WebPkiClientVerifier;
 
 #[cfg(test)]
 mod test_helpers;
@@ -17,6 +18,11 @@ use tokio_rustls::{
 
 /// The label used when exporting key material from a TLS session
 const EXPORTER_LABEL: &[u8; 24] = b"EXPORTER-Channel-Binding";
+
+pub struct TlsCertAndKey {
+    pub cert_chain: Vec<CertificateDer<'static>>,
+    pub key: PrivateKeyDer<'static>,
+}
 
 struct Proxy<L, R>
 where
@@ -48,20 +54,36 @@ where
 
 impl<L: AttestationPlatform, R: AttestationPlatform> ProxyServer<L, R> {
     pub async fn new(
-        cert_chain: Vec<CertificateDer<'static>>,
-        key: PrivateKeyDer<'static>,
+        cert_and_key: TlsCertAndKey,
         local: impl ToSocketAddrs,
         target: SocketAddr,
         local_attestation_platform: L,
         remote_attestation_platform: R,
+        client_auth: bool,
     ) -> Self {
-        let server_config = ServerConfig::builder()
-            .with_no_client_auth()
-            .with_single_cert(cert_chain.clone(), key)
-            .expect("Failed to create rustls server config");
+        if remote_attestation_platform.is_cvm() && !client_auth {
+            panic!("Client auth is required when the client is running in a CVM");
+        }
+
+        let server_config = if client_auth {
+            let root_store =
+                RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+            let verifier = WebPkiClientVerifier::builder(Arc::new(root_store))
+                .build()
+                .expect("invalid client verifier");
+            ServerConfig::builder()
+                .with_client_cert_verifier(verifier)
+                .with_single_cert(cert_and_key.cert_chain.clone(), cert_and_key.key)
+                .expect("Failed to create rustls server config")
+        } else {
+            ServerConfig::builder()
+                .with_no_client_auth()
+                .with_single_cert(cert_and_key.cert_chain.clone(), cert_and_key.key)
+                .expect("Failed to create rustls server config")
+        };
 
         Self::new_with_tls_config(
-            cert_chain,
+            cert_and_key.cert_chain,
             server_config.into(),
             local,
             target,
@@ -187,17 +209,28 @@ where
 
 impl<L: AttestationPlatform, R: AttestationPlatform> ProxyClient<L, R> {
     pub async fn new(
+        cert_and_key: Option<TlsCertAndKey>,
         address: impl ToSocketAddrs,
         server_address: SocketAddr,
         server_name: ServerName<'static>,
         local_attestation_platform: L,
         remote_attestation_platform: R,
-        cert_chain: Option<Vec<CertificateDer<'static>>>,
     ) -> Self {
         let root_store = RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-        let client_config = ClientConfig::builder()
-            .with_root_certificates(root_store)
-            .with_no_client_auth();
+
+        let client_config = if let Some(ref cert_and_key) = cert_and_key {
+            ClientConfig::builder()
+                .with_root_certificates(root_store)
+                .with_client_auth_cert(
+                    cert_and_key.cert_chain.clone(),
+                    cert_and_key.key.clone_key(),
+                )
+                .unwrap()
+        } else {
+            ClientConfig::builder()
+                .with_root_certificates(root_store)
+                .with_no_client_auth()
+        };
 
         Self::new_with_tls_config(
             client_config.into(),
@@ -206,7 +239,7 @@ impl<L: AttestationPlatform, R: AttestationPlatform> ProxyClient<L, R> {
             server_name,
             local_attestation_platform,
             remote_attestation_platform,
-            cert_chain,
+            cert_and_key.map(|c| c.cert_chain),
         )
         .await
     }
