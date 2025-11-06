@@ -5,6 +5,8 @@ use x509_parser::prelude::*;
 
 /// Represents a CVM technology with quote generation and verification
 pub trait AttestationPlatform: Clone + Send + 'static {
+    fn is_cvm(&self) -> bool;
+
     fn create_attestation(
         &self,
         cert_chain: &[CertificateDer<'_>],
@@ -24,6 +26,10 @@ pub trait AttestationPlatform: Clone + Send + 'static {
 pub struct MockAttestation;
 
 impl AttestationPlatform for MockAttestation {
+    fn is_cvm(&self) -> bool {
+        true
+    }
+
     /// Mocks creating an attestation
     fn create_attestation(
         &self,
@@ -61,6 +67,10 @@ impl AttestationPlatform for MockAttestation {
 pub struct NoAttestation;
 
 impl AttestationPlatform for NoAttestation {
+    fn is_cvm(&self) -> bool {
+        false
+    }
+
     /// Mocks creating an attestation
     fn create_attestation(
         &self,

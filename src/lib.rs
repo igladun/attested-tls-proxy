@@ -2,6 +2,9 @@ mod attestation;
 
 pub use attestation::{AttestationPlatform, MockAttestation, NoAttestation};
 
+#[cfg(test)]
+mod test_helpers;
+
 use std::{net::SocketAddr, sync::Arc};
 use tokio::io::{self, AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, ToSocketAddrs};
@@ -69,7 +72,9 @@ impl<L: AttestationPlatform, R: AttestationPlatform> ProxyServer<L, R> {
     }
 
     /// Start with preconfigured TLS
-    pub async fn new_with_tls_config(
+    ///
+    /// This is not public as it allows dangerous configuration
+    async fn new_with_tls_config(
         cert_chain: Vec<CertificateDer<'static>>,
         server_config: Arc<ServerConfig>,
         local: impl ToSocketAddrs,
@@ -104,10 +109,10 @@ impl<L: AttestationPlatform, R: AttestationPlatform> ProxyServer<L, R> {
         let remote_attestation_platform = self.inner.remote_attestation_platform.clone();
         tokio::spawn(async move {
             let mut tls_stream = acceptor.accept(inbound).await.unwrap();
-            let (_io, server_connection) = tls_stream.get_ref();
+            let (_io, connection) = tls_stream.get_ref();
 
             let mut exporter = [0u8; 32];
-            server_connection
+            connection
                 .export_keying_material(
                     &mut exporter,
                     EXPORTER_LABEL,
@@ -115,9 +120,16 @@ impl<L: AttestationPlatform, R: AttestationPlatform> ProxyServer<L, R> {
                 )
                 .unwrap();
 
-            let attestation = local_attestation_platform
-                .create_attestation(&cert_chain, exporter)
-                .unwrap();
+            let remote_cert_chain = connection.peer_certificates().map(|c| c.to_owned());
+
+            let attestation = if local_attestation_platform.is_cvm() {
+                local_attestation_platform
+                    .create_attestation(&cert_chain, exporter)
+                    .unwrap()
+            } else {
+                Vec::new()
+            };
+
             let attestation_length_prefix = length_prefix(&attestation);
 
             tls_stream
@@ -134,9 +146,11 @@ impl<L: AttestationPlatform, R: AttestationPlatform> ProxyServer<L, R> {
             let mut buf = vec![0; length];
             tls_stream.read_exact(&mut buf).await.unwrap();
 
-            remote_attestation_platform
-                .verify_attestation(buf, &cert_chain, exporter)
-                .unwrap();
+            if remote_attestation_platform.is_cvm() {
+                remote_attestation_platform
+                    .verify_attestation(buf, &remote_cert_chain.unwrap(), exporter)
+                    .unwrap();
+            }
 
             let outbound = TcpStream::connect(target).await.unwrap();
 
@@ -167,6 +181,8 @@ where
     target: SocketAddr,
     /// The subject name of the proxy server
     target_name: ServerName<'static>,
+    /// Certificate chain for client auth
+    cert_chain: Option<Vec<CertificateDer<'static>>>,
 }
 
 impl<L: AttestationPlatform, R: AttestationPlatform> ProxyClient<L, R> {
@@ -176,6 +192,7 @@ impl<L: AttestationPlatform, R: AttestationPlatform> ProxyClient<L, R> {
         server_name: ServerName<'static>,
         local_attestation_platform: L,
         remote_attestation_platform: R,
+        cert_chain: Option<Vec<CertificateDer<'static>>>,
     ) -> Self {
         let root_store = RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
         let client_config = ClientConfig::builder()
@@ -189,6 +206,7 @@ impl<L: AttestationPlatform, R: AttestationPlatform> ProxyClient<L, R> {
             server_name,
             local_attestation_platform,
             remote_attestation_platform,
+            cert_chain,
         )
         .await
     }
@@ -200,6 +218,7 @@ impl<L: AttestationPlatform, R: AttestationPlatform> ProxyClient<L, R> {
         target_name: ServerName<'static>,
         local_attestation_platform: L,
         remote_attestation_platform: R,
+        cert_chain: Option<Vec<CertificateDer<'static>>>,
     ) -> Self {
         let listener = TcpListener::bind(local).await.unwrap();
         let connector = TlsConnector::from(client_config.clone());
@@ -209,11 +228,13 @@ impl<L: AttestationPlatform, R: AttestationPlatform> ProxyClient<L, R> {
             local_attestation_platform,
             remote_attestation_platform,
         };
+
         Self {
             inner,
             connector,
             target,
             target_name,
+            cert_chain,
         }
     }
 
@@ -225,6 +246,7 @@ impl<L: AttestationPlatform, R: AttestationPlatform> ProxyClient<L, R> {
         let target = self.target;
         let local_attestation_platform = self.inner.local_attestation_platform.clone();
         let remote_attestation_platform = self.inner.remote_attestation_platform.clone();
+        let cert_chain = self.cert_chain.clone();
 
         tokio::spawn(async move {
             let out = TcpStream::connect(target).await.unwrap();
@@ -241,7 +263,7 @@ impl<L: AttestationPlatform, R: AttestationPlatform> ProxyClient<L, R> {
                 )
                 .unwrap();
 
-            let cert_chain = server_connection.peer_certificates().unwrap().to_owned();
+            let remote_cert_chain = server_connection.peer_certificates().unwrap().to_owned();
 
             let mut length_bytes = [0; 4];
             tls_stream.read_exact(&mut length_bytes).await.unwrap();
@@ -250,13 +272,19 @@ impl<L: AttestationPlatform, R: AttestationPlatform> ProxyClient<L, R> {
             let mut buf = vec![0; length];
             tls_stream.read_exact(&mut buf).await.unwrap();
 
-            remote_attestation_platform
-                .verify_attestation(buf, &cert_chain, exporter)
-                .unwrap();
+            if remote_attestation_platform.is_cvm() {
+                remote_attestation_platform
+                    .verify_attestation(buf, &remote_cert_chain, exporter)
+                    .unwrap();
+            }
 
-            let attestation = local_attestation_platform
-                .create_attestation(&cert_chain, exporter)
-                .unwrap();
+            let attestation = if local_attestation_platform.is_cvm() {
+                local_attestation_platform
+                    .create_attestation(&cert_chain.unwrap(), exporter)
+                    .unwrap()
+            } else {
+                Vec::new()
+            };
 
             let attestation_length_prefix = length_prefix(&attestation);
 
@@ -291,79 +319,10 @@ fn length_prefix(input: &[u8]) -> [u8; 4] {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::net::TcpListener;
-
-    use rcgen::generate_simple_self_signed;
-    use std::{net::SocketAddr, sync::Arc};
-    use tokio_rustls::rustls::{
-        pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer},
-        ClientConfig, RootCertStore, ServerConfig,
+    use test_helpers::{
+        example_http_service, example_service, generate_certificate_chain, generate_tls_config,
+        generate_tls_config_with_client_auth,
     };
-
-    /// Helper to generate a self-signed certificate for testing
-    pub fn generate_certificate_chain(
-        name: String,
-    ) -> (Vec<CertificateDer<'static>>, PrivateKeyDer<'static>) {
-        let subject_alt_names = vec![name];
-        let cert_key = generate_simple_self_signed(subject_alt_names)
-            .expect("Failed to generate self-signed certificate");
-
-        let certs = vec![CertificateDer::from(cert_key.cert)];
-        let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(
-            cert_key.signing_key.serialize_der(),
-        ));
-        (certs, key)
-    }
-
-    /// Helper to generate TLS configuration for testing
-    ///
-    /// For the server: A given self-signed certificate
-    /// For the client: A root certificate store with the server's certificate
-    pub fn generate_tls_config(
-        certificate_chain: Vec<CertificateDer<'static>>,
-        key: PrivateKeyDer<'static>,
-    ) -> (Arc<ServerConfig>, Arc<ClientConfig>) {
-        let server_config = ServerConfig::builder()
-            .with_no_client_auth()
-            .with_single_cert(certificate_chain.clone(), key)
-            .expect("Failed to create rustls server config");
-
-        let mut root_store = RootCertStore::empty();
-        root_store.add(certificate_chain[0].clone()).unwrap();
-
-        let client_config = ClientConfig::builder()
-            .with_root_certificates(root_store)
-            .with_no_client_auth();
-
-        (Arc::new(server_config), Arc::new(client_config))
-    }
-
-    async fn example_http_service() -> SocketAddr {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-
-        let app = axum::Router::new().route("/", axum::routing::get(|| async { "foobar" }));
-
-        tokio::spawn(async move {
-            axum::serve(listener, app).await.unwrap();
-        });
-
-        addr
-    }
-
-    async fn example_service() -> SocketAddr {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-
-        tokio::spawn(async move {
-            loop {
-                let (mut inbound, _client_addr) = listener.accept().await.unwrap();
-                inbound.write_all(b"some data").await.unwrap();
-            }
-        });
-
-        addr
-    }
 
     #[tokio::test]
     async fn http_proxy() {
@@ -373,16 +332,13 @@ mod tests {
         let (cert_chain, private_key) = generate_certificate_chain(target_name.clone());
         let (server_config, client_config) = generate_tls_config(cert_chain.clone(), private_key);
 
-        let local_attestation_platform = MockAttestation;
-        let remote_attestation_platform = NoAttestation;
-
         let proxy_server = ProxyServer::new_with_tls_config(
             cert_chain,
             server_config,
             "127.0.0.1:0",
             target_addr,
-            local_attestation_platform,
-            remote_attestation_platform,
+            MockAttestation,
+            NoAttestation,
         )
         .await;
         let proxy_addr = proxy_server.local_addr().unwrap();
@@ -398,6 +354,69 @@ mod tests {
             target_name.try_into().unwrap(),
             NoAttestation,
             MockAttestation,
+            None,
+        )
+        .await;
+
+        let proxy_client_addr = proxy_client.local_addr().unwrap();
+
+        tokio::spawn(async move {
+            proxy_client.accept().await.unwrap();
+        });
+
+        let res = reqwest::get(format!("http://{}", proxy_client_addr.to_string()))
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+
+        assert_eq!(res, "foobar");
+    }
+
+    #[tokio::test]
+    async fn http_proxy_mutual_attestation() {
+        let target_addr = example_http_service().await;
+        let target_name = "name".to_string();
+
+        let (server_cert_chain, server_private_key) =
+            generate_certificate_chain(target_name.clone());
+        let (client_cert_chain, client_private_key) =
+            generate_certificate_chain(target_name.clone());
+
+        let (
+            (_client_tls_server_config, client_tls_client_config),
+            (server_tls_server_config, _server_tls_client_config),
+        ) = generate_tls_config_with_client_auth(
+            client_cert_chain.clone(),
+            client_private_key,
+            server_cert_chain.clone(),
+            server_private_key,
+        );
+
+        let proxy_server = ProxyServer::new_with_tls_config(
+            server_cert_chain,
+            server_tls_server_config,
+            "127.0.0.1:0",
+            target_addr,
+            MockAttestation,
+            MockAttestation,
+        )
+        .await;
+        let proxy_addr = proxy_server.local_addr().unwrap();
+
+        tokio::spawn(async move {
+            proxy_server.accept().await.unwrap();
+        });
+
+        let proxy_client = ProxyClient::new_with_tls_config(
+            client_tls_client_config,
+            "127.0.0.1:0",
+            proxy_addr,
+            target_name.try_into().unwrap(),
+            MockAttestation,
+            MockAttestation,
+            Some(client_cert_chain),
         )
         .await;
 
@@ -426,7 +445,6 @@ mod tests {
         let (server_config, client_config) = generate_tls_config(cert_chain.clone(), private_key);
 
         let local_attestation_platform = MockAttestation;
-        let remote_attestation_platform = NoAttestation;
 
         let proxy_server = ProxyServer::new_with_tls_config(
             cert_chain,
@@ -434,7 +452,7 @@ mod tests {
             "127.0.0.1:0",
             target_addr,
             local_attestation_platform,
-            remote_attestation_platform,
+            NoAttestation,
         )
         .await;
         let proxy_server_addr = proxy_server.local_addr().unwrap();
@@ -450,6 +468,7 @@ mod tests {
             target_name.try_into().unwrap(),
             NoAttestation,
             MockAttestation,
+            None,
         )
         .await;
         let proxy_client_addr = proxy_client.local_addr().unwrap();
