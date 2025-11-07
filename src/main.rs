@@ -4,7 +4,7 @@ use std::{fs::File, net::SocketAddr, path::PathBuf};
 use tokio_rustls::rustls::pki_types::{CertificateDer, PrivateKeyDer};
 
 use attested_tls_proxy::{
-    get_tls_cert, MockAttestation, NoAttestation, ProxyClient, ProxyServer, TlsCertAndKey,
+    get_tls_cert, NoAttestation, ProxyClient, ProxyServer, TdxAttestation, TlsCertAndKey,
 };
 
 #[derive(Parser, Debug, Clone)]
@@ -84,7 +84,7 @@ async fn main() -> anyhow::Result<()> {
                 address,
                 server,
                 NoAttestation,
-                MockAttestation,
+                TdxAttestation,
             )
             .await?;
 
@@ -102,7 +102,7 @@ async fn main() -> anyhow::Result<()> {
             client_auth,
         } => {
             let tls_cert_and_chain = load_tls_cert_and_key(cert_chain, private_key)?;
-            let local_attestation = MockAttestation;
+            let local_attestation = TdxAttestation;
             let remote_attestation = NoAttestation;
 
             let server = ProxyServer::new(
@@ -122,7 +122,7 @@ async fn main() -> anyhow::Result<()> {
             }
         }
         CliCommand::GetTlsCert { server } => {
-            let cert_chain = get_tls_cert(server, MockAttestation).await?;
+            let cert_chain = get_tls_cert(server, TdxAttestation).await?;
             println!("{}", certs_to_pem_string(&cert_chain)?);
         }
     }

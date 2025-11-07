@@ -1,3 +1,4 @@
+use configfs_tsm::QuoteGenerationError;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tokio_rustls::rustls::pki_types::CertificateDer;
@@ -26,16 +27,14 @@ pub trait AttestationPlatform: Clone + Send + 'static {
     ) -> Result<(), AttestationError>;
 }
 
-/// For testing
 #[derive(Clone)]
-pub struct MockAttestation;
+pub struct TdxAttestation;
 
-impl AttestationPlatform for MockAttestation {
+impl AttestationPlatform for TdxAttestation {
     fn is_cvm(&self) -> bool {
         true
     }
 
-    /// Mocks creating an attestation
     fn create_attestation(
         &self,
         cert_chain: &[CertificateDer<'_>],
@@ -45,10 +44,10 @@ impl AttestationPlatform for MockAttestation {
         let pki_hash = get_pki_hash_from_certificate_chain(cert_chain)?;
         quote_input[..32].copy_from_slice(&pki_hash);
         quote_input[32..].copy_from_slice(&exporter);
-        Ok(quote_input.to_vec())
+
+        Ok(generate_quote(quote_input)?)
     }
 
-    /// Mocks verifying an attestation
     fn verify_attestation(
         &self,
         input: Vec<u8>,
@@ -60,9 +59,17 @@ impl AttestationPlatform for MockAttestation {
         quote_input[..32].copy_from_slice(&pki_hash);
         quote_input[32..].copy_from_slice(&exporter);
 
-        if input != quote_input {
+        let quote = tdx_quote::Quote::from_bytes(&input).unwrap();
+
+        // In tests we use mock quotes which will fail to verify
+        if cfg!(not(test)) {
+            quote.verify().unwrap();
+        }
+
+        if quote.report_input_data() != quote_input {
             return Err(AttestationError::InputMismatch);
         }
+
         Ok(())
     }
 }
@@ -100,6 +107,26 @@ impl AttestationPlatform for NoAttestation {
     }
 }
 
+/// Create a mock quote for testing on non-confidential hardware
+#[cfg(test)]
+fn generate_quote(input: [u8; 64]) -> Result<Vec<u8>, QuoteGenerationError> {
+    let attestation_key = tdx_quote::SigningKey::random(&mut rand_core::OsRng);
+    let provisioning_certification_key = tdx_quote::SigningKey::random(&mut rand_core::OsRng);
+    Ok(tdx_quote::Quote::mock(
+        attestation_key.clone(),
+        provisioning_certification_key.clone(),
+        input,
+        b"Mock cert chain".to_vec(),
+    )
+    .as_bytes())
+}
+
+/// Create a quote
+#[cfg(not(test))]
+fn generate_quote(input: [u8; 64]) -> Result<Vec<u8>, QuoteGenerationError> {
+    configfs_tsm::create_quote(input)
+}
+
 /// Given a certificate chain, get the [Sha256] hash of the public key of the leaf certificate
 fn get_pki_hash_from_certificate_chain(
     cert_chain: &[CertificateDer<'_>],
@@ -127,4 +154,6 @@ pub enum AttestationError {
     InputMismatch,
     #[error("Configuration mismatch - expected no remote attestation")]
     AttestationGivenWhenNoneExpected,
+    #[error("Configfs-tsm quote generation: {0}")]
+    QuoteGeneration(#[from] configfs_tsm::QuoteGenerationError),
 }
