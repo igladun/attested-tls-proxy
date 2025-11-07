@@ -125,11 +125,8 @@ fn load_tls_cert_and_key(
 }
 
 pub fn load_certs_pem(path: PathBuf) -> std::io::Result<Vec<CertificateDer<'static>>> {
-    Ok(
-        rustls_pemfile::certs(&mut std::io::BufReader::new(File::open(path)?))
-            .map(|res| res.unwrap()) //TODO
-            .collect(),
-    )
+    rustls_pemfile::certs(&mut std::io::BufReader::new(File::open(path)?))
+        .collect::<Result<Vec<_>, _>>()
 }
 
 pub fn load_private_key_pem(path: PathBuf) -> anyhow::Result<PrivateKeyDer<'static>> {
