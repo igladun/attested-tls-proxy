@@ -1,7 +1,7 @@
 mod attestation;
 
 use attestation::AttestationError;
-pub use attestation::{AttestationPlatform, NoAttestation, TdxAttestation};
+pub use attestation::{AttestationPlatform, DcapTdxAttestation, NoAttestation};
 use thiserror::Error;
 use tokio_rustls::rustls::server::{VerifierBuilderError, WebPkiClientVerifier};
 
@@ -510,7 +510,7 @@ mod tests {
             server_config,
             "127.0.0.1:0",
             target_addr,
-            TdxAttestation,
+            DcapTdxAttestation,
             NoAttestation,
         )
         .await
@@ -527,7 +527,7 @@ mod tests {
             "127.0.0.1:0".to_string(),
             proxy_addr.to_string(),
             NoAttestation,
-            TdxAttestation,
+            DcapTdxAttestation,
             None,
         )
         .await
@@ -573,8 +573,8 @@ mod tests {
             server_tls_server_config,
             "127.0.0.1:0",
             target_addr,
-            TdxAttestation,
-            TdxAttestation,
+            DcapTdxAttestation,
+            DcapTdxAttestation,
         )
         .await
         .unwrap();
@@ -589,8 +589,8 @@ mod tests {
             client_tls_client_config,
             "127.0.0.1:0",
             proxy_addr.to_string(),
-            TdxAttestation,
-            TdxAttestation,
+            DcapTdxAttestation,
+            DcapTdxAttestation,
             Some(client_cert_chain),
         )
         .await
@@ -619,7 +619,7 @@ mod tests {
         let (cert_chain, private_key) = generate_certificate_chain("127.0.0.1".parse().unwrap());
         let (server_config, client_config) = generate_tls_config(cert_chain.clone(), private_key);
 
-        let local_attestation_platform = TdxAttestation;
+        let local_attestation_platform = DcapTdxAttestation;
 
         let proxy_server = ProxyServer::new_with_tls_config(
             cert_chain,
@@ -643,7 +643,7 @@ mod tests {
             "127.0.0.1:0",
             proxy_server_addr.to_string(),
             NoAttestation,
-            TdxAttestation,
+            DcapTdxAttestation,
             None,
         )
         .await
@@ -670,7 +670,7 @@ mod tests {
         let (cert_chain, private_key) = generate_certificate_chain("127.0.0.1".parse().unwrap());
         let (server_config, client_config) = generate_tls_config(cert_chain.clone(), private_key);
 
-        let local_attestation_platform = TdxAttestation;
+        let local_attestation_platform = DcapTdxAttestation;
 
         let proxy_server = ProxyServer::new_with_tls_config(
             cert_chain.clone(),
@@ -689,10 +689,13 @@ mod tests {
             proxy_server.accept().await.unwrap();
         });
 
-        let retrieved_chain =
-            get_tls_cert_with_config(proxy_server_addr.to_string(), TdxAttestation, client_config)
-                .await
-                .unwrap();
+        let retrieved_chain = get_tls_cert_with_config(
+            proxy_server_addr.to_string(),
+            DcapTdxAttestation,
+            client_config,
+        )
+        .await
+        .unwrap();
 
         assert_eq!(retrieved_chain, cert_chain);
     }

@@ -28,9 +28,9 @@ pub trait AttestationPlatform: Clone + Send + 'static {
 }
 
 #[derive(Clone)]
-pub struct TdxAttestation;
+pub struct DcapTdxAttestation;
 
-impl AttestationPlatform for TdxAttestation {
+impl AttestationPlatform for DcapTdxAttestation {
     fn is_cvm(&self) -> bool {
         true
     }
