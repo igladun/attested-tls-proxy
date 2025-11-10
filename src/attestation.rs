@@ -131,63 +131,61 @@ impl QuoteVerifier for DcapTdxQuoteVerifier {
         true
     }
 
-    fn verify_attestation(
+    async fn verify_attestation(
         &self,
         input: Vec<u8>,
         cert_chain: &[CertificateDer<'_>],
         exporter: [u8; 32],
-    ) -> impl Future<Output = Result<(), AttestationError>> + Send {
-        async move {
-            let quote_input = compute_report_input(cert_chain, exporter)?;
-            let (platform_measurements, image_measurements) = if cfg!(not(test)) {
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_secs();
-                let quote = Quote::parse(&input).unwrap();
-                let ca = quote.ca().unwrap();
-                let fmspc = hex::encode_upper(quote.fmspc().unwrap());
-                let collateral = get_collateral_for_fmspc(PCS_URL, fmspc, ca, false)
-                    .await
-                    .unwrap();
-                let _verified_report = dcap_qvl::verify::verify(&input, &collateral, now).unwrap();
+    ) -> Result<(), AttestationError> {
+        let quote_input = compute_report_input(cert_chain, exporter)?;
+        let (platform_measurements, image_measurements) = if cfg!(not(test)) {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+            let quote = Quote::parse(&input).unwrap();
+            let ca = quote.ca().unwrap();
+            let fmspc = hex::encode_upper(quote.fmspc().unwrap());
+            let collateral = get_collateral_for_fmspc(PCS_URL, fmspc, ca, false)
+                .await
+                .unwrap();
+            let _verified_report = dcap_qvl::verify::verify(&input, &collateral, now).unwrap();
 
-                let quote = Quote::parse(&input).unwrap();
-                let measurements = (
-                    PlatformMeasurements::from_dcap_qvl_quote(&quote)?,
-                    CvmImageMeasurements::from_dcap_qvl_quote(&quote)?,
-                );
-                if get_quote_input_data(quote.report) != quote_input {
-                    return Err(AttestationError::InputMismatch);
-                }
-                measurements
-            } else {
-                // In tests we use mock quotes which will fail to verify
-                let quote = tdx_quote::Quote::from_bytes(&input).unwrap();
-                if quote.report_input_data() != quote_input {
-                    return Err(AttestationError::InputMismatch);
-                }
-
-                (
-                    PlatformMeasurements::from_tdx_quote(&quote),
-                    CvmImageMeasurements::from_tdx_quote(&quote),
-                )
-            };
-
-            if let Some(accepted_platform_measurements) = &self.accepted_platform_measurements {
-                if !accepted_platform_measurements.contains(&platform_measurements) {
-                    panic!("Bad measurements");
-                }
+            let quote = Quote::parse(&input).unwrap();
+            let measurements = (
+                PlatformMeasurements::from_dcap_qvl_quote(&quote)?,
+                CvmImageMeasurements::from_dcap_qvl_quote(&quote)?,
+            );
+            if get_quote_input_data(quote.report) != quote_input {
+                return Err(AttestationError::InputMismatch);
+            }
+            measurements
+        } else {
+            // In tests we use mock quotes which will fail to verify
+            let quote = tdx_quote::Quote::from_bytes(&input).unwrap();
+            if quote.report_input_data() != quote_input {
+                return Err(AttestationError::InputMismatch);
             }
 
-            if !self
-                .accepted_cvm_image_measurements
-                .contains(&image_measurements)
-            {
+            (
+                PlatformMeasurements::from_tdx_quote(&quote),
+                CvmImageMeasurements::from_tdx_quote(&quote),
+            )
+        };
+
+        if let Some(accepted_platform_measurements) = &self.accepted_platform_measurements {
+            if !accepted_platform_measurements.contains(&platform_measurements) {
                 panic!("Bad measurements");
             }
-            Ok(())
         }
+
+        if !self
+            .accepted_cvm_image_measurements
+            .contains(&image_measurements)
+        {
+            panic!("Bad measurements");
+        }
+        Ok(())
     }
 }
 
