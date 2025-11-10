@@ -173,10 +173,10 @@ impl QuoteVerifier for DcapTdxQuoteVerifier {
             )
         };
 
-        if let Some(accepted_platform_measurements) = &self.accepted_platform_measurements {
-            if !accepted_platform_measurements.contains(&platform_measurements) {
-                panic!("Bad measurements");
-            }
+        if let Some(accepted_platform_measurements) = &self.accepted_platform_measurements
+            && !accepted_platform_measurements.contains(&platform_measurements)
+        {
+            panic!("Bad measurements");
         }
 
         if !self
