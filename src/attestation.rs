@@ -1,8 +1,14 @@
 use configfs_tsm::QuoteGenerationError;
+use dcap_qvl::{
+    collateral::get_collateral_for_fmspc,
+    quote::{Quote, Report},
+};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tokio_rustls::rustls::pki_types::CertificateDer;
 use x509_parser::prelude::*;
+
+const PCS_URL: &str = "https://api.trustedservices.intel.com";
 
 /// Represents a CVM technology with quote generation and verification
 pub trait AttestationPlatform: Clone + Send + 'static {
@@ -24,7 +30,7 @@ pub trait AttestationPlatform: Clone + Send + 'static {
         input: Vec<u8>,
         cert_chain: &[CertificateDer<'_>],
         exporter: [u8; 32],
-    ) -> Result<(), AttestationError>;
+    ) -> impl Future<Output = Result<(), AttestationError>> + Send;
 }
 
 #[derive(Clone)]
@@ -40,10 +46,7 @@ impl AttestationPlatform for DcapTdxAttestation {
         cert_chain: &[CertificateDer<'_>],
         exporter: [u8; 32],
     ) -> Result<Vec<u8>, AttestationError> {
-        let mut quote_input = [0u8; 64];
-        let pki_hash = get_pki_hash_from_certificate_chain(cert_chain)?;
-        quote_input[..32].copy_from_slice(&pki_hash);
-        quote_input[32..].copy_from_slice(&exporter);
+        let quote_input = compute_report_input(cert_chain, exporter)?;
 
         Ok(generate_quote(quote_input)?)
     }
@@ -53,25 +56,55 @@ impl AttestationPlatform for DcapTdxAttestation {
         input: Vec<u8>,
         cert_chain: &[CertificateDer<'_>],
         exporter: [u8; 32],
-    ) -> Result<(), AttestationError> {
-        let mut quote_input = [0u8; 64];
-        let pki_hash = get_pki_hash_from_certificate_chain(cert_chain)?;
-        quote_input[..32].copy_from_slice(&pki_hash);
-        quote_input[32..].copy_from_slice(&exporter);
+    ) -> impl Future<Output = Result<(), AttestationError>> + Send {
+        async move {
+            let quote_input = compute_report_input(cert_chain, exporter)?;
 
-        let quote = tdx_quote::Quote::from_bytes(&input).unwrap();
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+            let quote = Quote::parse(&input).unwrap();
+            let ca = quote.ca().unwrap();
+            let fmspc = hex::encode_upper(quote.fmspc().unwrap());
+            let collateral = get_collateral_for_fmspc(PCS_URL, fmspc, ca, false)
+                .await
+                .unwrap();
 
-        // In tests we use mock quotes which will fail to verify
-        if cfg!(not(test)) {
-            quote.verify().unwrap();
+            // In tests we use mock quotes which will fail to verify
+            if cfg!(not(test)) {
+                let _verified_report = dcap_qvl::verify::verify(&input, &collateral, now).unwrap();
+            }
+            let quote = Quote::parse(&input).unwrap();
+            if get_quote_input_data(quote.report) != quote_input {
+                return Err(AttestationError::InputMismatch);
+            }
+
+            Ok(())
         }
-
-        if quote.report_input_data() != quote_input {
-            return Err(AttestationError::InputMismatch);
-        }
-
-        Ok(())
     }
+}
+
+/// Given a [Report] get the input data regardless of report type
+fn get_quote_input_data(report: Report) -> [u8; 64] {
+    match report {
+        Report::TD10(r) => r.report_data,
+        Report::TD15(r) => r.base.report_data,
+        Report::SgxEnclave(r) => r.report_data,
+    }
+}
+
+/// Given a certificate chain and an exporter (session key material), build the quote input value
+/// SHA256(pki) || exporter
+pub fn compute_report_input(
+    cert_chain: &[CertificateDer<'_>],
+    exporter: [u8; 32],
+) -> Result<[u8; 64], AttestationError> {
+    let mut quote_input = [0u8; 64];
+    let pki_hash = get_pki_hash_from_certificate_chain(cert_chain)?;
+    quote_input[..32].copy_from_slice(&pki_hash);
+    quote_input[32..].copy_from_slice(&exporter);
+    Ok(quote_input)
 }
 
 /// For no CVM platform (eg: for one-sided remote-attested TLS)
@@ -93,7 +126,7 @@ impl AttestationPlatform for NoAttestation {
     }
 
     /// Ensure that an empty attestation is given
-    fn verify_attestation(
+    async fn verify_attestation(
         &self,
         input: Vec<u8>,
         _cert_chain: &[CertificateDer<'_>],

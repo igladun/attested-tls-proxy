@@ -192,11 +192,13 @@ impl<L: AttestationPlatform, R: AttestationPlatform> ProxyServer<L, R> {
         tls_stream.read_exact(&mut buf).await?;
 
         if remote_attestation_platform.is_cvm() {
-            remote_attestation_platform.verify_attestation(
-                buf,
-                &remote_cert_chain.ok_or(ProxyError::NoClientAuth)?,
-                exporter,
-            )?;
+            remote_attestation_platform
+                .verify_attestation(
+                    buf,
+                    &remote_cert_chain.ok_or(ProxyError::NoClientAuth)?,
+                    exporter,
+                )
+                .await?;
         }
 
         let outbound = TcpStream::connect(target).await?;
@@ -359,7 +361,9 @@ impl<L: AttestationPlatform, R: AttestationPlatform> ProxyClient<L, R> {
         tls_stream.read_exact(&mut buf).await?;
 
         if remote_attestation_platform.is_cvm() {
-            remote_attestation_platform.verify_attestation(buf, &remote_cert_chain, exporter)?;
+            remote_attestation_platform
+                .verify_attestation(buf, &remote_cert_chain, exporter)
+                .await?;
         }
 
         let attestation = if local_attestation_platform.is_cvm() {
@@ -436,7 +440,9 @@ async fn get_tls_cert_with_config<R: AttestationPlatform>(
     tls_stream.read_exact(&mut buf).await?;
 
     if remote_attestation_platform.is_cvm() {
-        remote_attestation_platform.verify_attestation(buf, &remote_cert_chain, exporter)?;
+        remote_attestation_platform
+            .verify_attestation(buf, &remote_cert_chain, exporter)
+            .await?;
     }
 
     Ok(remote_cert_chain)
