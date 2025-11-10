@@ -536,6 +536,7 @@ mod tests {
                 rtmr2: [0u8; 48],
                 rtmr3: [0u8; 48],
             }],
+            pccs_url: None,
         };
 
         tokio::spawn(async move {
@@ -595,6 +596,7 @@ mod tests {
                 rtmr2: [0u8; 48],
                 rtmr3: [0u8; 48],
             }],
+            pccs_url: None,
         };
 
         let proxy_server = ProxyServer::new_with_tls_config(
@@ -672,6 +674,7 @@ mod tests {
                 rtmr2: [0u8; 48],
                 rtmr3: [0u8; 48],
             }],
+            pccs_url: None,
         };
 
         let proxy_client = ProxyClient::new_with_tls_config(
@@ -730,6 +733,7 @@ mod tests {
                 rtmr2: [0u8; 48],
                 rtmr3: [0u8; 48],
             }],
+            pccs_url: None,
         };
 
         let retrieved_chain =

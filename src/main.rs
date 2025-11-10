@@ -87,6 +87,7 @@ async fn main() -> anyhow::Result<()> {
                     rtmr2: [0u8; 48],
                     rtmr3: [0u8; 48],
                 }],
+                pccs_url: None,
             };
 
             let client = ProxyClient::new(
@@ -139,6 +140,7 @@ async fn main() -> anyhow::Result<()> {
                     rtmr2: [0u8; 48],
                     rtmr3: [0u8; 48],
                 }],
+                pccs_url: None,
             };
             let cert_chain = get_tls_cert(server, quote_verifier).await?;
             println!("{}", certs_to_pem_string(&cert_chain)?);
