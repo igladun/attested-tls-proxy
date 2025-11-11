@@ -212,11 +212,20 @@ impl<L: QuoteGenerator, R: QuoteVerifier> ProxyServer<L, R> {
         }
 
         let http = Builder::new();
-        let service =
-            service_fn(move |req| async move { Self::handle_http_request(req, target).await });
+        let service = service_fn(move |req| async move {
+            match Self::handle_http_request(req, target).await {
+                Ok(res) => Ok::<Response<BoxBody<bytes::Bytes, hyper::Error>>, hyper::Error>(res),
+                Err(e) => {
+                    eprintln!("send_request error: {e}");
+                    let mut resp = Response::new(full(format!("Request failed: {e}")));
+                    *resp.status_mut() = hyper::StatusCode::BAD_GATEWAY;
+                    Ok(resp)
+                }
+            }
+        });
 
         let io = TokioIo::new(tls_stream);
-        http.serve_connection(io, service).await.unwrap();
+        http.serve_connection(io, service).await?;
 
         Ok(())
     }
@@ -225,14 +234,12 @@ impl<L: QuoteGenerator, R: QuoteVerifier> ProxyServer<L, R> {
     async fn handle_http_request(
         req: hyper::Request<hyper::body::Incoming>,
         target: SocketAddr,
-    ) -> Result<Response<BoxBody<bytes::Bytes, hyper::Error>>, hyper::Error> {
-        let outbound = TcpStream::connect(target).await.unwrap();
+    ) -> Result<Response<BoxBody<bytes::Bytes, hyper::Error>>, ProxyError> {
+        let outbound = TcpStream::connect(target).await?;
         let outbound_io = TokioIo::new(outbound);
         let (mut sender, conn) = hyper::client::conn::http1::Builder::new()
             .handshake::<_, hyper::body::Incoming>(outbound_io)
-            .await
-            .unwrap();
-
+            .await?;
         // Drive the connection
         tokio::spawn(async move {
             if let Err(e) = conn.await {
@@ -387,7 +394,7 @@ impl<L: QuoteGenerator, R: QuoteVerifier> ProxyClient<L, R> {
             let local_attestation_platform = local_attestation_platform.clone();
             let remote_attestation_platform = remote_attestation_platform.clone();
             async move {
-                Self::handle_http_request(
+                match Self::handle_http_request(
                     req,
                     connector,
                     target,
@@ -396,11 +403,22 @@ impl<L: QuoteGenerator, R: QuoteVerifier> ProxyClient<L, R> {
                     remote_attestation_platform,
                 )
                 .await
+                {
+                    Ok(res) => {
+                        Ok::<Response<BoxBody<bytes::Bytes, hyper::Error>>, hyper::Error>(res)
+                    }
+                    Err(e) => {
+                        eprintln!("send_request error: {e}");
+                        let mut resp = Response::new(full(format!("Request failed: {e}")));
+                        *resp.status_mut() = hyper::StatusCode::BAD_GATEWAY;
+                        Ok(resp)
+                    }
+                }
             }
         });
 
         let io = TokioIo::new(inbound);
-        http.serve_connection(io, service).await.unwrap();
+        http.serve_connection(io, service).await?;
 
         Ok(())
     }
@@ -468,7 +486,7 @@ impl<L: QuoteGenerator, R: QuoteVerifier> ProxyClient<L, R> {
         cert_chain: Option<Vec<CertificateDer<'static>>>,
         local_attestation_platform: L,
         remote_attestation_platform: R,
-    ) -> Result<Response<BoxBody<bytes::Bytes, hyper::Error>>, hyper::Error> {
+    ) -> Result<Response<BoxBody<bytes::Bytes, hyper::Error>>, ProxyError> {
         let tls_stream = Self::setup_connection(
             connector,
             target,
@@ -476,15 +494,13 @@ impl<L: QuoteGenerator, R: QuoteVerifier> ProxyClient<L, R> {
             local_attestation_platform,
             remote_attestation_platform,
         )
-        .await
-        .unwrap();
+        .await?;
 
         // Now the attestation is done, forward the request to the proxy server
         let outbound_io = TokioIo::new(tls_stream);
         let (mut sender, conn) = hyper::client::conn::http1::Builder::new()
             .handshake::<_, hyper::body::Incoming>(outbound_io)
-            .await
-            .unwrap();
+            .await?;
 
         // Drive the connection
         tokio::spawn(async move {
@@ -583,6 +599,8 @@ pub enum ProxyError {
     IntConversion(#[from] TryFromIntError),
     #[error("Bad host name: {0}")]
     BadDnsName(#[from] tokio_rustls::rustls::pki_types::InvalidDnsNameError),
+    #[error("HTTP: {0}")]
+    Hyper(#[from] hyper::Error),
 }
 
 /// Given a byte array, encode its length as a 4 byte big endian u32
