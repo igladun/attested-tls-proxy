@@ -225,7 +225,16 @@ impl<L: QuoteGenerator, R: QuoteVerifier> ProxyServer<L, R> {
             if let Some(measurements) = measurements {
                 let headers = req.headers_mut();
 
-                headers.insert(MEASUREMENT_HEADER, measurements.to_header_format().unwrap());
+                match measurements.to_header_format() {
+                    Ok(header_value) => {
+                        headers.insert(MEASUREMENT_HEADER, header_value);
+                    }
+                    Err(e) => {
+                        // This error is highly unlikely - that the measurement values fail to
+                        // encode to JSON or fit in an HTTP header
+                        eprintln!("Failed to encode measurement values: {e}");
+                    }
+                }
             }
 
             async move {
@@ -262,7 +271,7 @@ impl<L: QuoteGenerator, R: QuoteVerifier> ProxyServer<L, R> {
         // Drive the connection
         tokio::spawn(async move {
             if let Err(e) = conn.await {
-                eprintln!("client conn error: {e}");
+                eprintln!("Client connection error: {e}");
             }
         });
 
@@ -532,7 +541,7 @@ impl<L: QuoteGenerator, R: QuoteVerifier> ProxyClient<L, R> {
         // Drive the connection
         tokio::spawn(async move {
             if let Err(e) = conn.await {
-                eprintln!("client conn error: {e}");
+                eprintln!("Client connection error: {e}");
             }
         });
 
@@ -540,7 +549,16 @@ impl<L: QuoteGenerator, R: QuoteVerifier> ProxyClient<L, R> {
             Ok(mut resp) => {
                 if let Some(measurements) = measurements {
                     let headers = resp.headers_mut();
-                    headers.insert(MEASUREMENT_HEADER, measurements.to_header_format().unwrap());
+                    match measurements.to_header_format() {
+                        Ok(header_value) => {
+                            headers.insert(MEASUREMENT_HEADER, header_value);
+                        }
+                        Err(e) => {
+                            // This error is highly unlikely - that the measurement values fail to
+                            // encode to JSON or fit in an HTTP header
+                            eprintln!("Failed to encode measurement values: {e}");
+                        }
+                    }
                 }
                 Ok(resp.map(|b| b.boxed()))
             }
