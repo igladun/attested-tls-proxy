@@ -5,7 +5,6 @@ use dcap_qvl::{
     collateral::get_collateral_for_fmspc,
     quote::{Quote, Report},
 };
-use http::{header::InvalidHeaderValue, HeaderValue};
 use sha2::{Digest, Sha256};
 use tdx_quote::QuoteParseError;
 use thiserror::Error;
@@ -22,16 +21,14 @@ pub struct Measurements {
 }
 
 impl Measurements {
-    pub fn to_header_format(&self) -> Result<HeaderValue, MeasurementFormatError> {
+    pub fn to_header_format(&self) -> Result<String, MeasurementFormatError> {
         let mut measurements_map = HashMap::new();
         measurements_map.insert(0, hex::encode(self.platform.mrtd));
         measurements_map.insert(1, hex::encode(self.platform.rtmr0));
         measurements_map.insert(2, hex::encode(self.cvm_image.rtmr1));
         measurements_map.insert(3, hex::encode(self.cvm_image.rtmr2));
         measurements_map.insert(4, hex::encode(self.cvm_image.rtmr3));
-        Ok(HeaderValue::from_str(&serde_json::to_string(
-            &measurements_map,
-        )?)?)
+        Ok(serde_json::to_string(&measurements_map)?)
     }
 
     pub fn from_header_format(input: &str) -> Result<Self, MeasurementFormatError> {
@@ -43,23 +40,13 @@ impl Measurements {
 
         Ok(Self {
             platform: PlatformMeasurements {
-                mrtd: *measurements_map
-                    .get(&0)
-                    .ok_or(MeasurementFormatError::MissingValue("MRTD".to_string()))?,
-                rtmr0: *measurements_map
-                    .get(&1)
-                    .ok_or(MeasurementFormatError::MissingValue("MRTD".to_string()))?,
+                mrtd: *measurements_map.get(&0).ok_or(MeasurementFormatError::MissingValue("MRTD".to_string())?,
+                rtmr0: *measurements_map.get(&1).unwrap(),
             },
             cvm_image: CvmImageMeasurements {
-                rtmr1: *measurements_map
-                    .get(&2)
-                    .ok_or(MeasurementFormatError::MissingValue("MRTD".to_string()))?,
-                rtmr2: *measurements_map
-                    .get(&3)
-                    .ok_or(MeasurementFormatError::MissingValue("MRTD".to_string()))?,
-                rtmr3: *measurements_map
-                    .get(&4)
-                    .ok_or(MeasurementFormatError::MissingValue("MRTD".to_string()))?,
+                rtmr1: *measurements_map.get(&2).unwrap(),
+                rtmr2: *measurements_map.get(&3).unwrap(),
+                rtmr3: *measurements_map.get(&4).unwrap(),
             },
         })
     }
@@ -71,8 +58,6 @@ pub enum MeasurementFormatError {
     Json(#[from] serde_json::Error),
     #[error("Missing value: {0}")]
     MissingValue(String),
-    #[error("Invalid header value: {0}")]
-    BadHeaderValue(#[from] InvalidHeaderValue),
 }
 
 /// Defines how to generate a quote

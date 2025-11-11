@@ -1,6 +1,6 @@
 pub mod attestation;
 
-use attestation::AttestationError;
+use attestation::{AttestationError, Measurements};
 pub use attestation::{
     DcapTdxQuoteGenerator, DcapTdxQuoteVerifier, NoQuoteGenerator, NoQuoteVerifier, QuoteGenerator,
     QuoteVerifier,
@@ -31,6 +31,11 @@ use tokio_rustls::{
 
 /// The label used when exporting key material from a TLS session
 const EXPORTER_LABEL: &[u8; 24] = b"EXPORTER-Channel-Binding";
+
+// const ATTESTATION_TYPE_HEADER: &str = "X-Flashbots-Attestation-Type";
+
+/// The header name for giving measurements
+const MEASUREMENT_HEADER: &str = "X-Flashbots-Measurement";
 
 pub struct TlsCertAndKey {
     pub cert_chain: Vec<CertificateDer<'static>>,
@@ -201,25 +206,39 @@ impl<L: QuoteGenerator, R: QuoteVerifier> ProxyServer<L, R> {
         let mut buf = vec![0; length];
         tls_stream.read_exact(&mut buf).await?;
 
-        if remote_attestation_platform.is_cvm() {
+        let measurements = if remote_attestation_platform.is_cvm() {
             remote_attestation_platform
                 .verify_attestation(
                     buf,
                     &remote_cert_chain.ok_or(ProxyError::NoClientAuth)?,
                     exporter,
                 )
-                .await?;
-        }
+                .await?
+        } else {
+            None
+        };
 
         let http = Builder::new();
-        let service = service_fn(move |req| async move {
-            match Self::handle_http_request(req, target).await {
-                Ok(res) => Ok::<Response<BoxBody<bytes::Bytes, hyper::Error>>, hyper::Error>(res),
-                Err(e) => {
-                    eprintln!("send_request error: {e}");
-                    let mut resp = Response::new(full(format!("Request failed: {e}")));
-                    *resp.status_mut() = hyper::StatusCode::BAD_GATEWAY;
-                    Ok(resp)
+        let service = service_fn(move |mut req| {
+            // If we have measurements, add them to the request header
+            let measurements = measurements.clone();
+            if let Some(measurements) = measurements {
+                let headers = req.headers_mut();
+
+                headers.insert(MEASUREMENT_HEADER, measurements.to_header_format().unwrap());
+            }
+
+            async move {
+                match Self::handle_http_request(req, target).await {
+                    Ok(res) => {
+                        Ok::<Response<BoxBody<bytes::Bytes, hyper::Error>>, hyper::Error>(res)
+                    }
+                    Err(e) => {
+                        eprintln!("send_request error: {e}");
+                        let mut resp = Response::new(full(format!("Request failed: {e}")));
+                        *resp.status_mut() = hyper::StatusCode::BAD_GATEWAY;
+                        Ok(resp)
+                    }
                 }
             }
         });
@@ -429,7 +448,13 @@ impl<L: QuoteGenerator, R: QuoteVerifier> ProxyClient<L, R> {
         cert_chain: Option<Vec<CertificateDer<'static>>>,
         local_attestation_platform: L,
         remote_attestation_platform: R,
-    ) -> Result<tokio_rustls::client::TlsStream<TcpStream>, ProxyError> {
+    ) -> Result<
+        (
+            tokio_rustls::client::TlsStream<TcpStream>,
+            Option<Measurements>,
+        ),
+        ProxyError,
+    > {
         let out = TcpStream::connect(&target).await?;
         let mut tls_stream = connector
             .connect(server_name_from_host(&target)?, out)
@@ -456,11 +481,13 @@ impl<L: QuoteGenerator, R: QuoteVerifier> ProxyClient<L, R> {
         let mut buf = vec![0; length];
         tls_stream.read_exact(&mut buf).await?;
 
-        if remote_attestation_platform.is_cvm() {
+        let measurements = if remote_attestation_platform.is_cvm() {
             remote_attestation_platform
                 .verify_attestation(buf, &remote_cert_chain, exporter)
-                .await?;
-        }
+                .await?
+        } else {
+            None
+        };
 
         let attestation = if local_attestation_platform.is_cvm() {
             local_attestation_platform
@@ -475,7 +502,7 @@ impl<L: QuoteGenerator, R: QuoteVerifier> ProxyClient<L, R> {
 
         tls_stream.write_all(&attestation).await?;
 
-        Ok(tls_stream)
+        Ok((tls_stream, measurements))
     }
 
     // Handle a request from the source client to the proxy server
@@ -487,7 +514,7 @@ impl<L: QuoteGenerator, R: QuoteVerifier> ProxyClient<L, R> {
         local_attestation_platform: L,
         remote_attestation_platform: R,
     ) -> Result<Response<BoxBody<bytes::Bytes, hyper::Error>>, ProxyError> {
-        let tls_stream = Self::setup_connection(
+        let (tls_stream, measurements) = Self::setup_connection(
             connector,
             target,
             cert_chain,
@@ -510,7 +537,13 @@ impl<L: QuoteGenerator, R: QuoteVerifier> ProxyClient<L, R> {
         });
 
         match sender.send_request(req).await {
-            Ok(resp) => Ok(resp.map(|b| b.boxed())),
+            Ok(mut resp) => {
+                if let Some(measurements) = measurements {
+                    let headers = resp.headers_mut();
+                    headers.insert(MEASUREMENT_HEADER, measurements.to_header_format().unwrap());
+                }
+                Ok(resp.map(|b| b.boxed()))
+            }
             Err(e) => {
                 eprintln!("send_request error: {e}");
                 let mut resp = Response::new(full(format!("Request failed: {e}")));
@@ -636,8 +669,8 @@ mod tests {
 
     use super::*;
     use test_helpers::{
-        example_http_service, example_service, generate_certificate_chain, generate_tls_config,
-        generate_tls_config_with_client_auth,
+        default_measurements, example_http_service, example_service, generate_certificate_chain,
+        generate_tls_config, generate_tls_config_with_client_auth,
     };
 
     #[tokio::test]
@@ -693,12 +726,15 @@ mod tests {
 
         let res = reqwest::get(format!("http://{}", proxy_client_addr.to_string()))
             .await
-            .unwrap()
-            .text()
-            .await
             .unwrap();
 
-        assert_eq!(res, "foobar");
+        let headers = res.headers();
+        let measurements_json = headers.get(MEASUREMENT_HEADER).unwrap().to_str().unwrap();
+        let measurements = Measurements::from_header_format(measurements_json).unwrap();
+        assert_eq!(measurements, default_measurements());
+
+        let res_body = res.text().await.unwrap();
+        assert_eq!(res_body, "No measurements");
     }
 
     #[tokio::test]
@@ -766,12 +802,19 @@ mod tests {
 
         let res = reqwest::get(format!("http://{}", proxy_client_addr.to_string()))
             .await
-            .unwrap()
-            .text()
-            .await
             .unwrap();
 
-        assert_eq!(res, "foobar");
+        let headers = res.headers();
+        let measurements_json = headers.get(MEASUREMENT_HEADER).unwrap().to_str().unwrap();
+        let measurements = Measurements::from_header_format(measurements_json).unwrap();
+        assert_eq!(measurements, default_measurements());
+
+        let res_body = res.text().await.unwrap();
+
+        // The response body shows us what was in the request header (as the test http server
+        // handler puts them there)
+        let measurements = Measurements::from_header_format(&res_body).unwrap();
+        assert_eq!(measurements, default_measurements());
     }
 
     #[tokio::test]
