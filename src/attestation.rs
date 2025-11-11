@@ -48,18 +48,18 @@ impl Measurements {
                     .ok_or(MeasurementFormatError::MissingValue("MRTD".to_string()))?,
                 rtmr0: *measurements_map
                     .get(&1)
-                    .ok_or(MeasurementFormatError::MissingValue("MRTD".to_string()))?,
+                    .ok_or(MeasurementFormatError::MissingValue("RTMR0".to_string()))?,
             },
             cvm_image: CvmImageMeasurements {
                 rtmr1: *measurements_map
                     .get(&2)
-                    .ok_or(MeasurementFormatError::MissingValue("MRTD".to_string()))?,
+                    .ok_or(MeasurementFormatError::MissingValue("RTMR1".to_string()))?,
                 rtmr2: *measurements_map
                     .get(&3)
-                    .ok_or(MeasurementFormatError::MissingValue("MRTD".to_string()))?,
+                    .ok_or(MeasurementFormatError::MissingValue("RTMR2".to_string()))?,
                 rtmr3: *measurements_map
                     .get(&4)
-                    .ok_or(MeasurementFormatError::MissingValue("MRTD".to_string()))?,
+                    .ok_or(MeasurementFormatError::MissingValue("RTMR3".to_string()))?,
             },
         })
     }
