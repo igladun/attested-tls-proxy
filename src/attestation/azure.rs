@@ -1,11 +1,17 @@
 use az_tdx_vtpm::{hcl, imds, report, tdx, vtpm};
 use tokio_rustls::rustls::pki_types::CertificateDer;
 // use openssl::pkey::{PKey, Public};
+use base64::prelude::*;
+use reqwest::Client;
+use serde::Serialize;
 
 use crate::attestation::{compute_report_input, AttestationError, AttestationType, QuoteGenerator};
 
 #[derive(Clone)]
-pub struct MaaQuoteGenerator {}
+pub struct MaaQuoteGenerator {
+    maa_endpoint: String,
+    aad_access_token: String,
+}
 
 impl QuoteGenerator for MaaQuoteGenerator {
     /// Type of attestation used
@@ -18,7 +24,7 @@ impl QuoteGenerator for MaaQuoteGenerator {
         cert_chain: &[CertificateDer<'_>],
         exporter: [u8; 32],
     ) -> Result<Vec<u8>, AttestationError> {
-        let _quote_input = compute_report_input(cert_chain, exporter)?;
+        let quote_input = compute_report_input(cert_chain, exporter)?;
 
         let td_report = report::get_report().unwrap();
 
@@ -29,15 +35,19 @@ impl QuoteGenerator for MaaQuoteGenerator {
         // let rtmr3 = td_report.tdinfo.rtrm[3];
 
         // This makes a request to Azure Instance metadata service and gives us a binary response
-        let _td_quote_bytes = imds::get_td_quote(&td_report).unwrap();
+        let td_quote_bytes = imds::get_td_quote(&td_report).unwrap();
 
-        let bytes = vtpm::get_report().unwrap();
-        let hcl_report = hcl::HclReport::new(bytes).unwrap();
-        let var_data_hash = hcl_report.var_data_sha256();
-        let _ak_pub = hcl_report.ak_pub().unwrap();
+        let hcl_report_bytes = vtpm::get_report_with_report_data(&quote_input).unwrap();
+        let hcl_report = hcl::HclReport::new(hcl_report_bytes).unwrap();
+        let hcl_var_data = hcl_report.var_data();
 
-        let td_report: tdx::TdReport = hcl_report.try_into().unwrap();
-        assert!(var_data_hash == td_report.report_mac.reportdata[..32]);
+        // let bytes = vtpm::get_report().unwrap();
+        // let hcl_report = hcl::HclReport::new(bytes).unwrap();
+        // let var_data_hash = hcl_report.var_data_sha256();
+        // let _ak_pub = hcl_report.ak_pub().unwrap();
+        //
+        // let td_report: tdx::TdReport = hcl_report.try_into().unwrap();
+        // assert!(var_data_hash == td_report.report_mac.reportdata[..32]);
 
         // let nonce = "a nonce".as_bytes();
         //
@@ -45,6 +55,70 @@ impl QuoteGenerator for MaaQuoteGenerator {
         // let der = ak_pub.key.try_to_der().unwrap();
         // let pub_key = PKey::public_key_from_der(&der).unwrap();
         // tpm_quote.verify(&pub_key, nonce).unwrap();
+
+        let quote_b64 = BASE64_STANDARD.encode(&td_quote_bytes);
+        let runtime_b64 = BASE64_STANDARD.encode(hcl_var_data);
+
+        let body = TdxVmRequest {
+            quote: quote_b64,
+            runtimeData: Some(RuntimeData {
+                data: runtime_b64,
+                data_type: "Binary",
+            }),
+            nonce: Some("my-app-nonce-or-session-id".to_string()),
+        };
+        let body_bytes = serde_json::to_vec(&body).unwrap();
+        let jwt_token = self.call_tdxvm_attestation(body_bytes).await;
         todo!()
     }
+}
+
+impl MaaQuoteGenerator {
+    /// Get a signed JWT from the azure API
+    async fn call_tdxvm_attestation(
+        &self,
+        body_bytes: Vec<u8>,
+    ) -> Result<String, Box<dyn std::error::Error>> {
+        let url = format!("{}/attest/TdxVm?api-version=2025-06-01", self.maa_endpoint);
+
+        let client = Client::new();
+        let res = client
+            .post(&url)
+            .bearer_auth(&self.aad_access_token)
+            .header("Content-Type", "application/json")
+            .body(body_bytes)
+            .send()
+            .await?;
+
+        let status = res.status();
+        let text = res.text().await?;
+
+        if !status.is_success() {
+            return Err(format!("MAA attestation failed: {status} {text}").into());
+        }
+
+        #[derive(serde::Deserialize)]
+        struct AttestationResponse {
+            token: String,
+        }
+
+        let parsed: AttestationResponse = serde_json::from_str(&text)?;
+        Ok(parsed.token) // Microsoft-signed JWT
+    }
+}
+
+#[derive(Serialize)]
+struct RuntimeData<'a> {
+    data: String, // base64url of VarData bytes
+    #[serde(rename = "dataType")]
+    data_type: &'a str, // "Binary" in our case
+}
+
+#[derive(Serialize)]
+struct TdxVmRequest<'a> {
+    quote: String, // base64url(TDX quote)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    runtimeData: Option<RuntimeData<'a>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    nonce: Option<String>,
 }
