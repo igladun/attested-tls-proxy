@@ -1,4 +1,8 @@
-use std::{collections::HashMap, time::SystemTimeError};
+use std::{
+    collections::HashMap,
+    fmt::{self, Display, Formatter},
+    time::SystemTimeError,
+};
 
 use configfs_tsm::QuoteGenerationError;
 use dcap_qvl::{
@@ -75,12 +79,45 @@ pub enum MeasurementFormatError {
     BadHeaderValue(#[from] InvalidHeaderValue),
 }
 
+/// Type of attestaion used
+/// Only supported (or soon-to-be supported) types are given
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum AttestationType {
+    /// No attestion
+    None,
+    /// Mock attestion
+    Dummy,
+    /// TDX on Google Cloud Platform
+    GcpTdx,
+    /// TDX on Azure, with MAA
+    AzureTdx,
+    /// TDX on Qemu (no cloud platform)
+    QemuTdx,
+}
+
+impl AttestationType {
+    /// Matches the names used by Constellation aTLS
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            AttestationType::None => "none",
+            AttestationType::Dummy => "dummy",
+            AttestationType::AzureTdx => "azure-tdx",
+            AttestationType::QemuTdx => "qemu-tdx",
+            AttestationType::GcpTdx => "gcp-tdx",
+        }
+    }
+}
+
+impl Display for AttestationType {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// Defines how to generate a quote
 pub trait QuoteGenerator: Clone + Send + 'static {
-    /// Whether this is CVM attestation. This should always return true except for the [NoQuoteGenerator] case.
-    ///
-    /// When false, allows TLS client to be configured without client authentication
-    fn is_cvm(&self) -> bool;
+    /// Type of attestation used
+    fn attestation_type(&self) -> AttestationType;
 
     /// Generate an attestation
     fn create_attestation(
@@ -92,10 +129,8 @@ pub trait QuoteGenerator: Clone + Send + 'static {
 
 /// Defines how to verify a quote
 pub trait QuoteVerifier: Clone + Send + 'static {
-    /// Whether this is CVM attestation. This should always return true except for the [NoQuoteVerifier] case.
-    ///
-    /// When false, allows TLS client to be configured without client authentication
-    fn is_cvm(&self) -> bool;
+    /// Type of attestation used
+    fn attestation_type(&self) -> AttestationType;
 
     /// Verify the given attestation payload
     fn verify_attestation(
@@ -108,11 +143,14 @@ pub trait QuoteVerifier: Clone + Send + 'static {
 
 /// Quote generation using configfs_tsm
 #[derive(Clone)]
-pub struct DcapTdxQuoteGenerator;
+pub struct DcapTdxQuoteGenerator {
+    pub attestation_type: AttestationType,
+}
 
 impl QuoteGenerator for DcapTdxQuoteGenerator {
-    fn is_cvm(&self) -> bool {
-        true
+    /// Type of attestation used
+    fn attestation_type(&self) -> AttestationType {
+        self.attestation_type
     }
 
     fn create_attestation(
@@ -193,6 +231,7 @@ impl CvmImageMeasurements {
 /// OS image specific measurements
 #[derive(Clone)]
 pub struct DcapTdxQuoteVerifier {
+    pub attestation_type: AttestationType,
     /// Platform specific allowed Measurements
     /// Currently an option as this may be determined internally on a per-platform basis (Eg: GCP)
     pub accepted_platform_measurements: Option<Vec<PlatformMeasurements>>,
@@ -203,8 +242,9 @@ pub struct DcapTdxQuoteVerifier {
 }
 
 impl QuoteVerifier for DcapTdxQuoteVerifier {
-    fn is_cvm(&self) -> bool {
-        true
+    /// Type of attestation used
+    fn attestation_type(&self) -> AttestationType {
+        self.attestation_type
     }
 
     async fn verify_attestation(
@@ -300,8 +340,9 @@ pub fn compute_report_input(
 pub struct NoQuoteGenerator;
 
 impl QuoteGenerator for NoQuoteGenerator {
-    fn is_cvm(&self) -> bool {
-        false
+    /// Type of attestation used
+    fn attestation_type(&self) -> AttestationType {
+        AttestationType::None
     }
 
     /// Create an empty attestation
@@ -319,9 +360,11 @@ impl QuoteGenerator for NoQuoteGenerator {
 pub struct NoQuoteVerifier;
 
 impl QuoteVerifier for NoQuoteVerifier {
-    fn is_cvm(&self) -> bool {
-        false
+    /// Type of attestation used
+    fn attestation_type(&self) -> AttestationType {
+        AttestationType::None
     }
+
     /// Ensure that an empty attestation is given
     async fn verify_attestation(
         &self,

@@ -1,11 +1,12 @@
 pub mod attestation;
 
-use attestation::{AttestationError, Measurements};
+use attestation::{AttestationError, AttestationType, Measurements};
 pub use attestation::{
     DcapTdxQuoteGenerator, DcapTdxQuoteVerifier, NoQuoteGenerator, NoQuoteVerifier, QuoteGenerator,
     QuoteVerifier,
 };
 use bytes::Bytes;
+use http::HeaderValue;
 use http_body_util::combinators::BoxBody;
 use http_body_util::BodyExt;
 use hyper::server::conn::http1::Builder;
@@ -32,7 +33,7 @@ use tokio_rustls::{
 /// The label used when exporting key material from a TLS session
 const EXPORTER_LABEL: &[u8; 24] = b"EXPORTER-Channel-Binding";
 
-// const ATTESTATION_TYPE_HEADER: &str = "X-Flashbots-Attestation-Type";
+const ATTESTATION_TYPE_HEADER: &str = "X-Flashbots-Attestation-Type";
 
 /// The header name for giving measurements
 const MEASUREMENT_HEADER: &str = "X-Flashbots-Measurement";
@@ -83,7 +84,7 @@ impl<L: QuoteGenerator, R: QuoteVerifier> ProxyServer<L, R> {
         remote_quote_verifier: R,
         client_auth: bool,
     ) -> Result<Self, ProxyError> {
-        if remote_quote_verifier.is_cvm() && !client_auth {
+        if remote_quote_verifier.attestation_type() != AttestationType::None && !client_auth {
             return Err(ProxyError::NoClientAuth);
         }
 
@@ -191,7 +192,7 @@ impl<L: QuoteGenerator, R: QuoteVerifier> ProxyServer<L, R> {
 
         let remote_cert_chain = connection.peer_certificates().map(|c| c.to_owned());
 
-        let attestation = if local_quote_generator.is_cvm() {
+        let attestation = if local_quote_generator.attestation_type() != AttestationType::None {
             local_quote_generator.create_attestation(&cert_chain, exporter)?
         } else {
             Vec::new()
@@ -210,7 +211,7 @@ impl<L: QuoteGenerator, R: QuoteVerifier> ProxyServer<L, R> {
         let mut buf = vec![0; length];
         tls_stream.read_exact(&mut buf).await?;
 
-        let measurements = if remote_quote_verifier.is_cvm() {
+        let measurements = if remote_quote_verifier.attestation_type() != AttestationType::None {
             remote_quote_verifier
                 .verify_attestation(
                     buf,
@@ -221,6 +222,7 @@ impl<L: QuoteGenerator, R: QuoteVerifier> ProxyServer<L, R> {
         } else {
             None
         };
+        let remote_attestation_type = remote_quote_verifier.attestation_type();
 
         let http = Builder::new();
         let service = service_fn(move |mut req| {
@@ -239,6 +241,10 @@ impl<L: QuoteGenerator, R: QuoteVerifier> ProxyServer<L, R> {
                         eprintln!("Failed to encode measurement values: {e}");
                     }
                 }
+                headers.insert(
+                    ATTESTATION_TYPE_HEADER,
+                    HeaderValue::from_str(remote_attestation_type.as_str()).unwrap(),
+                );
             }
 
             async move {
@@ -318,7 +324,9 @@ impl<L: QuoteGenerator, R: QuoteVerifier> ProxyClient<L, R> {
         local_quote_generator: L,
         remote_quote_verifier: R,
     ) -> Result<Self, ProxyError> {
-        if local_quote_generator.is_cvm() && cert_and_key.is_none() {
+        if local_quote_generator.attestation_type() != AttestationType::None
+            && cert_and_key.is_none()
+        {
             return Err(ProxyError::NoClientAuth);
         }
 
@@ -494,15 +502,11 @@ impl<L: QuoteGenerator, R: QuoteVerifier> ProxyClient<L, R> {
         let mut buf = vec![0; length];
         tls_stream.read_exact(&mut buf).await?;
 
-        let measurements = if remote_quote_verifier.is_cvm() {
-            remote_quote_verifier
-                .verify_attestation(buf, &remote_cert_chain, exporter)
-                .await?
-        } else {
-            None
-        };
+        let measurements = remote_quote_verifier
+            .verify_attestation(buf, &remote_cert_chain, exporter)
+            .await?;
 
-        let attestation = if local_quote_generator.is_cvm() {
+        let attestation = if local_quote_generator.attestation_type() != AttestationType::None {
             local_quote_generator
                 .create_attestation(&cert_chain.ok_or(ProxyError::NoClientAuth)?, exporter)?
         } else {
@@ -527,6 +531,8 @@ impl<L: QuoteGenerator, R: QuoteVerifier> ProxyClient<L, R> {
         local_quote_generator: L,
         remote_quote_verifier: R,
     ) -> Result<Response<BoxBody<bytes::Bytes, hyper::Error>>, ProxyError> {
+        let remote_attestation_type = remote_quote_verifier.attestation_type();
+
         let (tls_stream, measurements) = Self::setup_connection(
             connector,
             target,
@@ -563,6 +569,10 @@ impl<L: QuoteGenerator, R: QuoteVerifier> ProxyClient<L, R> {
                             eprintln!("Failed to encode measurement values: {e}");
                         }
                     }
+                    headers.insert(
+                        ATTESTATION_TYPE_HEADER,
+                        HeaderValue::from_str(remote_attestation_type.as_str()).unwrap(),
+                    );
                 }
                 Ok(resp.map(|b| b.boxed()))
             }
@@ -621,11 +631,9 @@ async fn get_tls_cert_with_config<R: QuoteVerifier>(
     let mut buf = vec![0; length];
     tls_stream.read_exact(&mut buf).await?;
 
-    if remote_quote_verifier.is_cvm() {
-        remote_quote_verifier
-            .verify_attestation(buf, &remote_cert_chain, exporter)
-            .await?;
-    }
+    let _measurements = remote_quote_verifier
+        .verify_attestation(buf, &remote_cert_chain, exporter)
+        .await?;
 
     Ok(remote_cert_chain)
 }
@@ -702,7 +710,9 @@ mod tests {
             server_config,
             "127.0.0.1:0",
             target_addr,
-            DcapTdxQuoteGenerator,
+            DcapTdxQuoteGenerator {
+                attestation_type: AttestationType::Dummy,
+            },
             NoQuoteVerifier,
         )
         .await
@@ -711,6 +721,7 @@ mod tests {
         let proxy_addr = proxy_server.local_addr().unwrap();
 
         let quote_verifier = DcapTdxQuoteVerifier {
+            attestation_type: AttestationType::Dummy,
             accepted_platform_measurements: None,
             accepted_cvm_image_measurements: vec![CvmImageMeasurements {
                 rtmr1: [0u8; 48],
@@ -750,6 +761,13 @@ mod tests {
         let measurements = Measurements::from_header_format(measurements_json).unwrap();
         assert_eq!(measurements, default_measurements());
 
+        let attestation_type = headers
+            .get(ATTESTATION_TYPE_HEADER)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert_eq!(attestation_type, AttestationType::Dummy.as_str());
+
         let res_body = res.text().await.unwrap();
         assert_eq!(res_body, "No measurements");
     }
@@ -774,6 +792,7 @@ mod tests {
         );
 
         let quote_verifier = DcapTdxQuoteVerifier {
+            attestation_type: AttestationType::Dummy,
             accepted_platform_measurements: None,
             accepted_cvm_image_measurements: vec![CvmImageMeasurements {
                 rtmr1: [0u8; 48],
@@ -788,7 +807,9 @@ mod tests {
             server_tls_server_config,
             "127.0.0.1:0",
             target_addr,
-            DcapTdxQuoteGenerator,
+            DcapTdxQuoteGenerator {
+                attestation_type: AttestationType::Dummy,
+            },
             quote_verifier.clone(),
         )
         .await
@@ -804,7 +825,9 @@ mod tests {
             client_tls_client_config,
             "127.0.0.1:0",
             proxy_addr.to_string(),
-            DcapTdxQuoteGenerator,
+            DcapTdxQuoteGenerator {
+                attestation_type: AttestationType::Dummy,
+            },
             quote_verifier,
             Some(client_cert_chain),
         )
@@ -826,6 +849,13 @@ mod tests {
         let measurements = Measurements::from_header_format(measurements_json).unwrap();
         assert_eq!(measurements, default_measurements());
 
+        let attestation_type = headers
+            .get(ATTESTATION_TYPE_HEADER)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert_eq!(attestation_type, AttestationType::Dummy.as_str());
+
         let res_body = res.text().await.unwrap();
 
         // The response body shows us what was in the request header (as the test http server
@@ -846,7 +876,9 @@ mod tests {
             server_config,
             "127.0.0.1:0",
             target_addr,
-            DcapTdxQuoteGenerator,
+            DcapTdxQuoteGenerator {
+                attestation_type: AttestationType::Dummy,
+            },
             NoQuoteVerifier,
         )
         .await
@@ -859,6 +891,7 @@ mod tests {
         });
 
         let quote_verifier = DcapTdxQuoteVerifier {
+            attestation_type: AttestationType::Dummy,
             accepted_platform_measurements: None,
             accepted_cvm_image_measurements: vec![CvmImageMeasurements {
                 rtmr1: [0u8; 48],
