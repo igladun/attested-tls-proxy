@@ -1,4 +1,4 @@
-use az_tdx_vtpm::{hcl, imds, report, tdx, vtpm};
+use az_tdx_vtpm::{hcl, imds, report, vtpm};
 use tokio_rustls::rustls::pki_types::CertificateDer;
 // use openssl::pkey::{PKey, Public};
 use base64::prelude::*;
@@ -7,24 +7,26 @@ use serde::Serialize;
 
 use crate::attestation::{compute_report_input, AttestationError, AttestationType, QuoteGenerator};
 
+use super::QuoteVerifier;
+
 #[derive(Clone)]
-pub struct MaaQuoteGenerator {
+pub struct MaaGenerator {
     maa_endpoint: String,
     aad_access_token: String,
 }
 
-impl QuoteGenerator for MaaQuoteGenerator {
+impl QuoteGenerator for MaaGenerator {
     /// Type of attestation used
     fn attestation_type(&self) -> AttestationType {
         AttestationType::AzureTdx
     }
 
-    fn create_attestation(
+    async fn create_attestation(
         &self,
         cert_chain: &[CertificateDer<'_>],
         exporter: [u8; 32],
     ) -> Result<Vec<u8>, AttestationError> {
-        let quote_input = compute_report_input(cert_chain, exporter)?;
+        let input_data = compute_report_input(cert_chain, exporter)?;
 
         let td_report = report::get_report().unwrap();
 
@@ -37,7 +39,7 @@ impl QuoteGenerator for MaaQuoteGenerator {
         // This makes a request to Azure Instance metadata service and gives us a binary response
         let td_quote_bytes = imds::get_td_quote(&td_report).unwrap();
 
-        let hcl_report_bytes = vtpm::get_report_with_report_data(&quote_input).unwrap();
+        let hcl_report_bytes = vtpm::get_report_with_report_data(&input_data).unwrap();
         let hcl_report = hcl::HclReport::new(hcl_report_bytes).unwrap();
         let hcl_var_data = hcl_report.var_data();
 
@@ -61,19 +63,19 @@ impl QuoteGenerator for MaaQuoteGenerator {
 
         let body = TdxVmRequest {
             quote: quote_b64,
-            runtimeData: Some(RuntimeData {
+            runtime_data: Some(RuntimeData {
                 data: runtime_b64,
                 data_type: "Binary",
             }),
             nonce: Some("my-app-nonce-or-session-id".to_string()),
         };
         let body_bytes = serde_json::to_vec(&body).unwrap();
-        let jwt_token = self.call_tdxvm_attestation(body_bytes).await;
-        todo!()
+        let jwt_token = self.call_tdxvm_attestation(body_bytes).await.unwrap();
+        Ok(jwt_token.as_bytes().to_vec())
     }
 }
 
-impl MaaQuoteGenerator {
+impl MaaGenerator {
     /// Get a signed JWT from the azure API
     async fn call_tdxvm_attestation(
         &self,
@@ -107,6 +109,25 @@ impl MaaQuoteGenerator {
     }
 }
 
+#[derive(Clone)]
+pub struct MaaVerifier;
+
+impl QuoteVerifier for MaaVerifier {
+    fn attestation_type(&self) -> AttestationType {
+        AttestationType::AzureTdx
+    }
+
+    async fn verify_attestation(
+        &self,
+        input: Vec<u8>,
+        cert_chain: &[CertificateDer<'_>],
+        exporter: [u8; 32],
+    ) -> Result<Option<super::measurements::Measurements>, AttestationError> {
+        let input_data = compute_report_input(cert_chain, exporter)?;
+        todo!()
+    }
+}
+
 #[derive(Serialize)]
 struct RuntimeData<'a> {
     data: String, // base64url of VarData bytes
@@ -116,9 +137,9 @@ struct RuntimeData<'a> {
 
 #[derive(Serialize)]
 struct TdxVmRequest<'a> {
-    quote: String, // base64url(TDX quote)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    runtimeData: Option<RuntimeData<'a>>,
+    quote: String, // base64 (TDX quote)
+    #[serde(rename = "runtimeData", skip_serializing_if = "Option::is_none")]
+    runtime_data: Option<RuntimeData<'a>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     nonce: Option<String>,
 }

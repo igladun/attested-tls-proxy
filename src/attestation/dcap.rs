@@ -19,7 +19,7 @@ impl QuoteGenerator for DcapTdxQuoteGenerator {
         self.attestation_type
     }
 
-    fn create_attestation(
+    async fn create_attestation(
         &self,
         cert_chain: &[CertificateDer<'_>],
         exporter: [u8; 32],

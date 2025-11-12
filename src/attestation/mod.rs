@@ -54,7 +54,7 @@ impl Display for AttestationType {
     }
 }
 
-/// Defines how to generate a quote
+/// Defines how to generate an attestation
 pub trait QuoteGenerator: Clone + Send + 'static {
     /// Type of attestation used
     fn attestation_type(&self) -> AttestationType;
@@ -64,7 +64,7 @@ pub trait QuoteGenerator: Clone + Send + 'static {
         &self,
         cert_chain: &[CertificateDer<'_>],
         exporter: [u8; 32],
-    ) -> Result<Vec<u8>, AttestationError>;
+    ) -> impl Future<Output = Result<Vec<u8>, AttestationError>> + Send;
 }
 
 /// Defines how to verify a quote
@@ -114,7 +114,7 @@ impl QuoteGenerator for NoQuoteGenerator {
     }
 
     /// Create an empty attestation
-    fn create_attestation(
+    async fn create_attestation(
         &self,
         _cert_chain: &[CertificateDer<'_>],
         _exporter: [u8; 32],
