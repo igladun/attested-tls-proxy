@@ -47,26 +47,24 @@ pub struct TlsCertAndKey {
 }
 
 /// Inner struct used by [ProxyClient] and [ProxyServer]
-struct Proxy<L, R>
+struct Proxy<R>
 where
-    L: QuoteGenerator,
     R: QuoteVerifier,
 {
     /// The underlying TCP listener
     listener: TcpListener,
     /// Quote generation type to use (including none)
-    local_quote_generator: L,
+    local_quote_generator: Arc<dyn QuoteGenerator>,
     /// Verifier for remote attestation (including none)
     remote_quote_verifier: R,
 }
 
 /// A TLS over TCP server which provides an attestation before forwarding traffic to a given target address
-pub struct ProxyServer<L, R>
+pub struct ProxyServer<R>
 where
-    L: QuoteGenerator,
     R: QuoteVerifier,
 {
-    inner: Proxy<L, R>,
+    inner: Proxy<R>,
     /// The certificate chain
     cert_chain: Vec<CertificateDer<'static>>,
     /// For accepting TLS connections
@@ -75,12 +73,12 @@ where
     target: SocketAddr,
 }
 
-impl<L: QuoteGenerator, R: QuoteVerifier> ProxyServer<L, R> {
+impl<R: QuoteVerifier> ProxyServer<R> {
     pub async fn new(
         cert_and_key: TlsCertAndKey,
         local: impl ToSocketAddrs,
         target: SocketAddr,
-        local_quote_generator: L,
+        local_quote_generator: Arc<dyn QuoteGenerator>,
         remote_quote_verifier: R,
         client_auth: bool,
     ) -> Result<Self, ProxyError> {
@@ -121,7 +119,7 @@ impl<L: QuoteGenerator, R: QuoteVerifier> ProxyServer<L, R> {
         server_config: Arc<ServerConfig>,
         local: impl ToSocketAddrs,
         target: SocketAddr,
-        local_quote_generator: L,
+        local_quote_generator: Arc<dyn QuoteGenerator>,
         remote_quote_verifier: R,
     ) -> Result<Self, ProxyError> {
         let acceptor = tokio_rustls::TlsAcceptor::from(server_config);
@@ -177,7 +175,7 @@ impl<L: QuoteGenerator, R: QuoteVerifier> ProxyServer<L, R> {
         acceptor: TlsAcceptor,
         target: SocketAddr,
         cert_chain: Vec<CertificateDer<'static>>,
-        local_quote_generator: L,
+        local_quote_generator: Arc<dyn QuoteGenerator>,
         remote_quote_verifier: R,
     ) -> Result<(), ProxyError> {
         let mut tls_stream = acceptor.accept(inbound).await?;
@@ -303,12 +301,11 @@ fn full<T: Into<Bytes>>(chunk: T) -> BoxBody<Bytes, hyper::Error> {
         .boxed()
 }
 
-pub struct ProxyClient<L, R>
+pub struct ProxyClient<R>
 where
-    L: QuoteGenerator,
     R: QuoteVerifier,
 {
-    inner: Proxy<L, R>,
+    inner: Proxy<R>,
     connector: TlsConnector,
     /// The host and port of the proxy server
     target: String,
@@ -316,12 +313,12 @@ where
     cert_chain: Option<Vec<CertificateDer<'static>>>,
 }
 
-impl<L: QuoteGenerator, R: QuoteVerifier> ProxyClient<L, R> {
+impl<R: QuoteVerifier> ProxyClient<R> {
     pub async fn new(
         cert_and_key: Option<TlsCertAndKey>,
         address: impl ToSocketAddrs,
         server_name: String,
-        local_quote_generator: L,
+        local_quote_generator: Arc<dyn QuoteGenerator>,
         remote_quote_verifier: R,
     ) -> Result<Self, ProxyError> {
         if local_quote_generator.attestation_type() != AttestationType::None
@@ -363,7 +360,7 @@ impl<L: QuoteGenerator, R: QuoteVerifier> ProxyClient<L, R> {
         client_config: Arc<ClientConfig>,
         local: impl ToSocketAddrs,
         target_name: String,
-        local_quote_generator: L,
+        local_quote_generator: Arc<dyn QuoteGenerator>,
         remote_quote_verifier: R,
         cert_chain: Option<Vec<CertificateDer<'static>>>,
     ) -> Result<Self, ProxyError> {
@@ -423,7 +420,7 @@ impl<L: QuoteGenerator, R: QuoteVerifier> ProxyClient<L, R> {
         connector: TlsConnector,
         target: String,
         cert_chain: Option<Vec<CertificateDer<'static>>>,
-        local_quote_generator: L,
+        local_quote_generator: Arc<dyn QuoteGenerator>,
         remote_quote_verifier: R,
     ) -> Result<(), ProxyError> {
         let http = Builder::new();
@@ -467,7 +464,7 @@ impl<L: QuoteGenerator, R: QuoteVerifier> ProxyClient<L, R> {
         connector: TlsConnector,
         target: String,
         cert_chain: Option<Vec<CertificateDer<'static>>>,
-        local_quote_generator: L,
+        local_quote_generator: Arc<dyn QuoteGenerator>,
         remote_quote_verifier: R,
     ) -> Result<
         (
@@ -528,7 +525,7 @@ impl<L: QuoteGenerator, R: QuoteVerifier> ProxyClient<L, R> {
         connector: TlsConnector,
         target: String,
         cert_chain: Option<Vec<CertificateDer<'static>>>,
-        local_quote_generator: L,
+        local_quote_generator: Arc<dyn QuoteGenerator>,
         remote_quote_verifier: R,
     ) -> Result<Response<BoxBody<bytes::Bytes, hyper::Error>>, ProxyError> {
         let remote_attestation_type = remote_quote_verifier.attestation_type();
@@ -710,9 +707,9 @@ mod tests {
             server_config,
             "127.0.0.1:0",
             target_addr,
-            DcapTdxQuoteGenerator {
+            Arc::new(DcapTdxQuoteGenerator {
                 attestation_type: AttestationType::Dummy,
-            },
+            }),
             NoQuoteVerifier,
         )
         .await
@@ -739,7 +736,7 @@ mod tests {
             client_config,
             "127.0.0.1:0".to_string(),
             proxy_addr.to_string(),
-            NoQuoteGenerator,
+            Arc::new(NoQuoteGenerator),
             quote_verifier,
             None,
         )
@@ -807,9 +804,9 @@ mod tests {
             server_tls_server_config,
             "127.0.0.1:0",
             target_addr,
-            DcapTdxQuoteGenerator {
+            Arc::new(DcapTdxQuoteGenerator {
                 attestation_type: AttestationType::Dummy,
-            },
+            }),
             quote_verifier.clone(),
         )
         .await
@@ -825,9 +822,9 @@ mod tests {
             client_tls_client_config,
             "127.0.0.1:0",
             proxy_addr.to_string(),
-            DcapTdxQuoteGenerator {
+            Arc::new(DcapTdxQuoteGenerator {
                 attestation_type: AttestationType::Dummy,
-            },
+            }),
             quote_verifier,
             Some(client_cert_chain),
         )
@@ -876,9 +873,9 @@ mod tests {
             server_config,
             "127.0.0.1:0",
             target_addr,
-            DcapTdxQuoteGenerator {
+            Arc::new(DcapTdxQuoteGenerator {
                 attestation_type: AttestationType::Dummy,
-            },
+            }),
             NoQuoteVerifier,
         )
         .await

@@ -5,8 +5,7 @@ use tokio_rustls::rustls::pki_types::{CertificateDer, PrivateKeyDer};
 
 use attested_tls_proxy::{
     attestation::{AttestationType, CvmImageMeasurements},
-    get_tls_cert, DcapTdxQuoteGenerator, DcapTdxQuoteVerifier, NoQuoteGenerator, NoQuoteVerifier,
-    ProxyClient, ProxyServer, TlsCertAndKey,
+    get_tls_cert, DcapTdxQuoteVerifier, NoQuoteVerifier, ProxyClient, ProxyServer, TlsCertAndKey,
 };
 
 #[derive(Parser, Debug, Clone)]
@@ -49,14 +48,12 @@ enum CliCommand {
         /// If other than None, a TLS key and certicate must also be given
         #[arg(long)]
         client_attestation_type: Option<String>,
-        // Value: string(proxy.AttestationNone),
+        /// Optional path to file containing JSON measurements to be enforced on the server
+        #[arg(long)]
+        server_measurements: Option<String>,
         // TODO missing:
         // Name:  "tls-ca-certificate",
         // Usage: "additional CA certificate to verify against (PEM) [default=no additional TLS certs]. Only valid with --verify-tls.",
-        //
-        //
-        // Name:  "server-measurements",
-        // Usage: "optional path to JSON measurements enforced on the server",
         //
         // Name:    "override-azurev6-tcbinfo",
         // Value:   false,
@@ -84,16 +81,16 @@ enum CliCommand {
         /// enabled.
         #[arg(long)]
         client_auth: bool,
+        /// Type of attestaion to present (dafaults to none)
+        /// If other than None, a TLS key and certicate must also be given
+        #[arg(long)]
+        server_attestation_type: Option<String>,
         // TODO missing:
         // Name:    "listen-addr-healthcheck",
         // EnvVars: []string{"LISTEN_ADDR_HEALTHCHECK"},
         // Value:   "",
         // Usage:   "address to listen on for health checks",
         //
-        // Name:    "server-attestation-type",
-        // EnvVars: []string{"SERVER_ATTESTATION_TYPE"},
-        // Value:   string(proxy.AttestationAuto),
-        // Usage:   "type of attestation to present (" + proxy.AvailableAttestationTypes + "). Set to " + string(proxy.AttestationDummy) + " to connect to a remote tdx quote provider. Defaults to automatic detection.",
         //
         // Name:    "client-measurements",
         // EnvVars: []string{"CLIENT_MEASUREMENTS"},
@@ -126,6 +123,7 @@ async fn main() -> anyhow::Result<()> {
             tls_private_key_path,
             tls_certificate_path,
             client_attestation_type,
+            server_measurements,
         } => {
             let tls_cert_and_chain = if let Some(private_key) = tls_private_key_path {
                 Some(load_tls_cert_and_key(
@@ -141,11 +139,10 @@ async fn main() -> anyhow::Result<()> {
                 None
             };
 
-            // TODO
-            let _client_attestation_type = match client_attestation_type {
-                Some(_) => AttestationType::QemuTdx,
-                None => AttestationType::None,
-            };
+            let client_attestation_type =
+                AttestationType::from_str(&client_attestation_type.unwrap_or("none".to_string()))?;
+
+            let client_attestation_generator = client_attestation_type.get_quote_generator()?;
 
             let quote_verifier = DcapTdxQuoteVerifier {
                 attestation_type: AttestationType::Dummy,
@@ -162,7 +159,7 @@ async fn main() -> anyhow::Result<()> {
                 tls_cert_and_chain,
                 listen_addr,
                 target_addr,
-                NoQuoteGenerator,
+                client_attestation_generator,
                 quote_verifier,
             )
             .await?;
@@ -179,19 +176,22 @@ async fn main() -> anyhow::Result<()> {
             tls_private_key_path,
             tls_certificate_path,
             client_auth,
+            server_attestation_type,
         } => {
             let tls_cert_and_chain =
                 load_tls_cert_and_key(tls_certificate_path, tls_private_key_path)?;
-            let local_attestation = DcapTdxQuoteGenerator {
-                attestation_type: AttestationType::Dummy,
-            };
+
+            let server_attestation_type =
+                AttestationType::from_str(&server_attestation_type.unwrap_or("none".to_string()))?;
+
+            let local_attestation_generator = server_attestation_type.get_quote_generator()?;
             let remote_attestation = NoQuoteVerifier;
 
             let server = ProxyServer::new(
                 tls_cert_and_chain,
                 listen_addr,
                 target_addr,
-                local_attestation,
+                local_attestation_generator,
                 remote_attestation,
                 client_auth,
             )

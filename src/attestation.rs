@@ -1,7 +1,5 @@
 use std::{
-    collections::HashMap,
-    fmt::{self, Display, Formatter},
-    time::SystemTimeError,
+    collections::HashMap, fmt::{self, Display, Formatter}, path::PathBuf, sync::Arc, time::SystemTimeError
 };
 
 use configfs_tsm::QuoteGenerationError;
@@ -15,6 +13,9 @@ use tdx_quote::QuoteParseError;
 use thiserror::Error;
 use tokio_rustls::rustls::pki_types::CertificateDer;
 use x509_parser::prelude::*;
+use serde::Deserialize;
+
+use crate::test_helpers::default_measurements;
 
 /// For fetching collateral directly from intel, if no PCCS is specified
 const PCS_URL: &str = "https://api.trustedservices.intel.com";
@@ -79,6 +80,39 @@ pub enum MeasurementFormatError {
     BadHeaderValue(#[from] InvalidHeaderValue),
 }
 
+#[derive(Debug)]
+pub struct MeasurementRecord {
+    measurement_id: String,
+    attestation_type: AttestationType,
+    measurements: Measurements,
+}
+
+#[derive(Debug, Deserialize)]
+struct MeasurementRecordSimple {
+    measurement_id: String,
+    attestation_type: String,
+    measurements: HashMap<String, MeasurementEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MeasurementEntry {
+    expected: String,
+}
+
+pub async fn get_measurements_from_file(measurement_file: PathBuf) -> Vec<MeasurementRecord> {
+    let measurements_json = tokio::fs::read(measurement_file).await.unwrap();
+    let measurements_simple: Vec<MeasurementRecordSimple> = serde_json::from_slice(&measurements_json).unwrap();
+    let measurements = Vec::new();
+    for measurement in measurements_simple {
+        measurements.push(MeasurementRecord {
+            measurement_id: measurement.measurement_id,
+            attestation_type: AttestationType::from_str(&measurement.attestation_type).unwrap(),
+            measurements: Measurements { platform: PlatformMeasurements { mrtd: (), rtmr0: () }, cvm_image: CvmImageMeasurements { rtmr1: (), rtmr2: (), rtmr3: () } }
+        });
+    }
+    measurements
+}
+
 /// Type of attestaion used
 /// Only supported (or soon-to-be supported) types are given
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -106,6 +140,26 @@ impl AttestationType {
             AttestationType::GcpTdx => "gcp-tdx",
         }
     }
+
+    pub fn from_str(input: &str) -> Result<Self, AttestationError> {
+       match input {
+           "none" => Ok(Self::None),
+           "dummy" => Ok(Self::Dummy),
+           "azure-tdx" => Ok(Self::AzureTdx),
+           "qemu-tdx" => Ok(Self::QemuTdx),
+           "gcp-tdx" => Ok(Self::GcpTdx),
+           _ => Err(AttestationError::AttestationTypeNotSupported)
+       }
+    }
+
+    pub fn get_quote_generator(&self) -> Result<Arc<dyn QuoteGenerator>, AttestationError> {
+        match self {
+            AttestationType::None => Ok(Arc::new(NoQuoteGenerator)),
+            AttestationType::AzureTdx => Err(AttestationError::AttestationTypeNotSupported),
+            AttestationType::Dummy => Err(AttestationError::AttestationTypeNotSupported),
+            _ => Ok(Arc::new(DcapTdxQuoteGenerator { attestation_type: *self })),
+        }
+    }
 }
 
 impl Display for AttestationType {
@@ -115,7 +169,7 @@ impl Display for AttestationType {
 }
 
 /// Defines how to generate a quote
-pub trait QuoteGenerator: Clone + Send + 'static {
+pub trait QuoteGenerator: Send + Sync + 'static {
     /// Type of attestation used
     fn attestation_type(&self) -> AttestationType;
 
@@ -441,4 +495,6 @@ pub enum AttestationError {
     DcapQvl(#[from] anyhow::Error),
     #[error("Quote parse: {0}")]
     QuoteParse(#[from] QuoteParseError),
+    #[error("Attestation type not supported")]
+    AttestationTypeNotSupported,
 }
