@@ -15,8 +15,6 @@ use tokio_rustls::rustls::pki_types::CertificateDer;
 use x509_parser::prelude::*;
 use serde::Deserialize;
 
-use crate::test_helpers::default_measurements;
-
 /// For fetching collateral directly from intel, if no PCCS is specified
 const PCS_URL: &str = "https://api.trustedservices.intel.com";
 
@@ -82,32 +80,43 @@ pub enum MeasurementFormatError {
 
 #[derive(Debug)]
 pub struct MeasurementRecord {
-    measurement_id: String,
-    attestation_type: AttestationType,
-    measurements: Measurements,
+    pub measurement_id: String,
+    pub attestation_type: AttestationType,
+    pub measurements: Measurements,
 }
 
-#[derive(Debug, Deserialize)]
-struct MeasurementRecordSimple {
-    measurement_id: String,
-    attestation_type: String,
-    measurements: HashMap<String, MeasurementEntry>,
-}
-
-#[derive(Debug, Deserialize)]
-struct MeasurementEntry {
-    expected: String,
-}
 
 pub async fn get_measurements_from_file(measurement_file: PathBuf) -> Vec<MeasurementRecord> {
+    #[derive(Debug, Deserialize)]
+    struct MeasurementRecordSimple {
+        measurement_id: String,
+        attestation_type: String,
+        measurements: HashMap<String, MeasurementEntry>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct MeasurementEntry {
+        expected: String,
+    }
+
     let measurements_json = tokio::fs::read(measurement_file).await.unwrap();
     let measurements_simple: Vec<MeasurementRecordSimple> = serde_json::from_slice(&measurements_json).unwrap();
-    let measurements = Vec::new();
+    let mut measurements = Vec::new();
     for measurement in measurements_simple {
         measurements.push(MeasurementRecord {
             measurement_id: measurement.measurement_id,
             attestation_type: AttestationType::from_str(&measurement.attestation_type).unwrap(),
-            measurements: Measurements { platform: PlatformMeasurements { mrtd: (), rtmr0: () }, cvm_image: CvmImageMeasurements { rtmr1: (), rtmr2: (), rtmr3: () } }
+            measurements: Measurements {
+                platform: PlatformMeasurements {
+                    mrtd: hex::decode(&measurement.measurements["0"].expected).unwrap().try_into().unwrap(),
+                    rtmr0: hex::decode(&measurement.measurements["1"].expected).unwrap().try_into().unwrap(),
+                },
+                cvm_image: CvmImageMeasurements {
+                    rtmr1: hex::decode(&measurement.measurements["2"].expected).unwrap().try_into().unwrap(),
+                    rtmr2: hex::decode(&measurement.measurements["3"].expected).unwrap().try_into().unwrap(),
+                    rtmr3: hex::decode(&measurement.measurements["4"].expected).unwrap().try_into().unwrap(),
+                }
+                }
         });
     }
     measurements
