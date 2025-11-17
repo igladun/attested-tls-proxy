@@ -36,7 +36,6 @@ enum CliCommand {
         #[arg(short, long, default_value = "0.0.0.0:0")]
         listen_addr: SocketAddr,
         /// The hostname:port or ip:port of the proxy server (port defaults to 443)
-        // TODO `cvm-reverse-proxy` accepts with with protocol, eg: `https://localhost:80`
         target_addr: String,
         /// The path to a PEM encoded private key for client authentication
         #[arg(long)]
@@ -116,6 +115,11 @@ async fn main() -> anyhow::Result<()> {
             client_attestation_type,
             server_measurements,
         } => {
+            let target_addr = target_addr
+                .strip_prefix("https://")
+                .unwrap_or(&target_addr)
+                .to_string();
+
             let tls_cert_and_chain = if let Some(private_key) = tls_private_key_path {
                 Some(load_tls_cert_and_key(
                     tls_certificate_path

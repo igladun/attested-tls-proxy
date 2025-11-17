@@ -73,18 +73,6 @@ impl AttestationType {
         }
     }
 
-    // pub fn parse_from_str(input: &str) -> Result<Self, AttestationError> {
-    //     match input {
-    //         "none" => Ok(Self::None),
-    //         "dummy" => Ok(Self::Dummy),
-    //         "azure-tdx" => Ok(Self::AzureTdx),
-    //         "qemu-tdx" => Ok(Self::QemuTdx),
-    //         "dcap-tdx" => Ok(Self::DcapTdx),
-    //         "gcp-tdx" => Ok(Self::GcpTdx),
-    //         _ => Err(AttestationError::AttestationTypeNotSupported),
-    //     }
-    // }
-
     pub fn get_quote_generator(&self) -> Result<Arc<dyn QuoteGenerator>, AttestationError> {
         match self {
             AttestationType::None => Ok(Arc::new(NoQuoteGenerator)),
@@ -122,12 +110,14 @@ pub struct AttestationVerifier {
 }
 
 impl AttestationVerifier {
+    /// Create an [AttestationVerifier] which will allow no remote attestation
     pub fn do_not_verify() -> Self {
         Self {
             accepted_measurements: Vec::new(),
         }
     }
 
+    /// Expect mock measurements used in tests
     #[cfg(test)]
     pub fn mock() -> Self {
         Self {
@@ -149,6 +139,7 @@ impl AttestationVerifier {
         }
     }
 
+    /// Verify an attestation, and ensure the measurements match one of our accepted measurements
     pub async fn verify_attestation(
         &self,
         attestation_payload: AttesationPayload,
@@ -182,6 +173,7 @@ impl AttestationVerifier {
         Ok(Some(measurements))
     }
 
+    /// Whether we allow no remote attestation
     pub fn has_remote_attestion(&self) -> bool {
         !self.accepted_measurements.is_empty()
     }
