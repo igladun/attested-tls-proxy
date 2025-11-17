@@ -1,10 +1,7 @@
 pub mod attestation;
 
-use attestation::{AttestationError, AttestationType, Measurements};
-pub use attestation::{
-    DcapTdxQuoteGenerator, DcapTdxQuoteVerifier, NoQuoteGenerator, NoQuoteVerifier, QuoteGenerator,
-    QuoteVerifier,
-};
+use attestation::{measurements::Measurements, AttestationError, AttestationType};
+pub use attestation::{DcapTdxQuoteGenerator, NoQuoteGenerator, QuoteGenerator};
 use bytes::Bytes;
 use http::HeaderValue;
 use http_body_util::combinators::BoxBody;
@@ -30,6 +27,8 @@ use tokio_rustls::{
     TlsAcceptor, TlsConnector,
 };
 
+use crate::attestation::{AttesationPayload, AttestationVerifier};
+
 /// The label used when exporting key material from a TLS session
 const EXPORTER_LABEL: &[u8; 24] = b"EXPORTER-Channel-Binding";
 
@@ -47,26 +46,18 @@ pub struct TlsCertAndKey {
 }
 
 /// Inner struct used by [ProxyClient] and [ProxyServer]
-struct Proxy<L, R>
-where
-    L: QuoteGenerator,
-    R: QuoteVerifier,
-{
+struct Proxy {
     /// The underlying TCP listener
     listener: TcpListener,
     /// Quote generation type to use (including none)
-    local_quote_generator: L,
+    local_quote_generator: Arc<dyn QuoteGenerator>,
     /// Verifier for remote attestation (including none)
-    remote_quote_verifier: R,
+    attestation_verifier: AttestationVerifier,
 }
 
 /// A TLS over TCP server which provides an attestation before forwarding traffic to a given target address
-pub struct ProxyServer<L, R>
-where
-    L: QuoteGenerator,
-    R: QuoteVerifier,
-{
-    inner: Proxy<L, R>,
+pub struct ProxyServer {
+    inner: Proxy,
     /// The certificate chain
     cert_chain: Vec<CertificateDer<'static>>,
     /// For accepting TLS connections
@@ -75,16 +66,16 @@ where
     target: SocketAddr,
 }
 
-impl<L: QuoteGenerator, R: QuoteVerifier> ProxyServer<L, R> {
+impl ProxyServer {
     pub async fn new(
         cert_and_key: TlsCertAndKey,
         local: impl ToSocketAddrs,
         target: SocketAddr,
-        local_quote_generator: L,
-        remote_quote_verifier: R,
+        local_quote_generator: Arc<dyn QuoteGenerator>,
+        attestation_verifier: AttestationVerifier,
         client_auth: bool,
     ) -> Result<Self, ProxyError> {
-        if remote_quote_verifier.attestation_type() != AttestationType::None && !client_auth {
+        if !attestation_verifier.has_remote_attestion() && !client_auth {
             return Err(ProxyError::NoClientAuth);
         }
 
@@ -108,7 +99,7 @@ impl<L: QuoteGenerator, R: QuoteVerifier> ProxyServer<L, R> {
             local,
             target,
             local_quote_generator,
-            remote_quote_verifier,
+            attestation_verifier,
         )
         .await
     }
@@ -121,8 +112,8 @@ impl<L: QuoteGenerator, R: QuoteVerifier> ProxyServer<L, R> {
         server_config: Arc<ServerConfig>,
         local: impl ToSocketAddrs,
         target: SocketAddr,
-        local_quote_generator: L,
-        remote_quote_verifier: R,
+        local_quote_generator: Arc<dyn QuoteGenerator>,
+        attestation_verifier: AttestationVerifier,
     ) -> Result<Self, ProxyError> {
         let acceptor = tokio_rustls::TlsAcceptor::from(server_config);
         let listener = TcpListener::bind(local).await?;
@@ -130,7 +121,7 @@ impl<L: QuoteGenerator, R: QuoteVerifier> ProxyServer<L, R> {
         let inner = Proxy {
             listener,
             local_quote_generator,
-            remote_quote_verifier,
+            attestation_verifier,
         };
 
         Ok(Self {
@@ -149,15 +140,15 @@ impl<L: QuoteGenerator, R: QuoteVerifier> ProxyServer<L, R> {
         let target = self.target;
         let cert_chain = self.cert_chain.clone();
         let local_quote_generator = self.inner.local_quote_generator.clone();
-        let remote_quote_verifier = self.inner.remote_quote_verifier.clone();
+        let attestation_verifier = self.inner.attestation_verifier.clone();
         tokio::spawn(async move {
             if let Err(err) = Self::handle_connection(
-                inbound,
+                inbound, // TODO should be AttestationType
                 acceptor,
                 target,
                 cert_chain,
                 local_quote_generator,
-                remote_quote_verifier,
+                attestation_verifier,
             )
             .await
             {
@@ -177,8 +168,8 @@ impl<L: QuoteGenerator, R: QuoteVerifier> ProxyServer<L, R> {
         acceptor: TlsAcceptor,
         target: SocketAddr,
         cert_chain: Vec<CertificateDer<'static>>,
-        local_quote_generator: L,
-        remote_quote_verifier: R,
+        local_quote_generator: Arc<dyn QuoteGenerator>,
+        attestation_verifier: AttestationVerifier,
     ) -> Result<(), ProxyError> {
         let mut tls_stream = acceptor.accept(inbound).await?;
         let (_io, connection) = tls_stream.get_ref();
@@ -193,7 +184,11 @@ impl<L: QuoteGenerator, R: QuoteVerifier> ProxyServer<L, R> {
         let remote_cert_chain = connection.peer_certificates().map(|c| c.to_owned());
 
         let attestation = if local_quote_generator.attestation_type() != AttestationType::None {
-            local_quote_generator.create_attestation(&cert_chain, exporter)?
+            serde_json::to_vec(&AttesationPayload::from_attestation_generator(
+                &cert_chain,
+                exporter,
+                local_quote_generator,
+            )?)?
         } else {
             Vec::new()
         };
@@ -211,18 +206,24 @@ impl<L: QuoteGenerator, R: QuoteVerifier> ProxyServer<L, R> {
         let mut buf = vec![0; length];
         tls_stream.read_exact(&mut buf).await?;
 
-        let measurements = if remote_quote_verifier.attestation_type() != AttestationType::None {
-            remote_quote_verifier
-                .verify_attestation(
-                    buf,
-                    &remote_cert_chain.ok_or(ProxyError::NoClientAuth)?,
-                    exporter,
-                )
-                .await?
+        let (measurements, remote_attestation_type) = if attestation_verifier.has_remote_attestion()
+        {
+            let remote_attestation_payload: AttesationPayload = serde_json::from_slice(&buf)?;
+
+            let remote_attestation_type = remote_attestation_payload.attestation_type;
+            (
+                attestation_verifier
+                    .verify_attestation(
+                        remote_attestation_payload,
+                        &remote_cert_chain.ok_or(ProxyError::NoClientAuth)?,
+                        exporter,
+                    )
+                    .await?,
+                remote_attestation_type,
+            )
         } else {
-            None
+            (None, AttestationType::None)
         };
-        let remote_attestation_type = remote_quote_verifier.attestation_type();
 
         let http = Builder::new();
         let service = service_fn(move |mut req| {
@@ -303,12 +304,8 @@ fn full<T: Into<Bytes>>(chunk: T) -> BoxBody<Bytes, hyper::Error> {
         .boxed()
 }
 
-pub struct ProxyClient<L, R>
-where
-    L: QuoteGenerator,
-    R: QuoteVerifier,
-{
-    inner: Proxy<L, R>,
+pub struct ProxyClient {
+    inner: Proxy,
     connector: TlsConnector,
     /// The host and port of the proxy server
     target: String,
@@ -316,13 +313,13 @@ where
     cert_chain: Option<Vec<CertificateDer<'static>>>,
 }
 
-impl<L: QuoteGenerator, R: QuoteVerifier> ProxyClient<L, R> {
+impl ProxyClient {
     pub async fn new(
         cert_and_key: Option<TlsCertAndKey>,
         address: impl ToSocketAddrs,
         server_name: String,
-        local_quote_generator: L,
-        remote_quote_verifier: R,
+        local_quote_generator: Arc<dyn QuoteGenerator>,
+        attestation_verifier: AttestationVerifier,
     ) -> Result<Self, ProxyError> {
         if local_quote_generator.attestation_type() != AttestationType::None
             && cert_and_key.is_none()
@@ -350,7 +347,7 @@ impl<L: QuoteGenerator, R: QuoteVerifier> ProxyClient<L, R> {
             address,
             server_name,
             local_quote_generator,
-            remote_quote_verifier,
+            attestation_verifier,
             cert_and_key.map(|c| c.cert_chain),
         )
         .await
@@ -363,8 +360,8 @@ impl<L: QuoteGenerator, R: QuoteVerifier> ProxyClient<L, R> {
         client_config: Arc<ClientConfig>,
         local: impl ToSocketAddrs,
         target_name: String,
-        local_quote_generator: L,
-        remote_quote_verifier: R,
+        local_quote_generator: Arc<dyn QuoteGenerator>,
+        attestation_verifier: AttestationVerifier,
         cert_chain: Option<Vec<CertificateDer<'static>>>,
     ) -> Result<Self, ProxyError> {
         let listener = TcpListener::bind(local).await?;
@@ -373,7 +370,7 @@ impl<L: QuoteGenerator, R: QuoteVerifier> ProxyClient<L, R> {
         let inner = Proxy {
             listener,
             local_quote_generator,
-            remote_quote_verifier,
+            attestation_verifier,
         };
 
         Ok(Self {
@@ -391,7 +388,7 @@ impl<L: QuoteGenerator, R: QuoteVerifier> ProxyClient<L, R> {
         let connector = self.connector.clone();
         let target = self.target.clone();
         let local_quote_generator = self.inner.local_quote_generator.clone();
-        let remote_quote_verifier = self.inner.remote_quote_verifier.clone();
+        let attestation_verifier = self.inner.attestation_verifier.clone();
         let cert_chain = self.cert_chain.clone();
 
         tokio::spawn(async move {
@@ -401,7 +398,7 @@ impl<L: QuoteGenerator, R: QuoteVerifier> ProxyClient<L, R> {
                 target,
                 cert_chain,
                 local_quote_generator,
-                remote_quote_verifier,
+                attestation_verifier,
             )
             .await
             {
@@ -423,8 +420,8 @@ impl<L: QuoteGenerator, R: QuoteVerifier> ProxyClient<L, R> {
         connector: TlsConnector,
         target: String,
         cert_chain: Option<Vec<CertificateDer<'static>>>,
-        local_quote_generator: L,
-        remote_quote_verifier: R,
+        local_quote_generator: Arc<dyn QuoteGenerator>,
+        attestation_verifier: AttestationVerifier,
     ) -> Result<(), ProxyError> {
         let http = Builder::new();
         let service = service_fn(move |req| {
@@ -432,7 +429,7 @@ impl<L: QuoteGenerator, R: QuoteVerifier> ProxyClient<L, R> {
             let target = target.clone();
             let cert_chain = cert_chain.clone();
             let local_quote_generator = local_quote_generator.clone();
-            let remote_quote_verifier = remote_quote_verifier.clone();
+            let attestation_verifier = attestation_verifier.clone();
             async move {
                 match Self::handle_http_request(
                     req,
@@ -440,7 +437,7 @@ impl<L: QuoteGenerator, R: QuoteVerifier> ProxyClient<L, R> {
                     target,
                     cert_chain,
                     local_quote_generator,
-                    remote_quote_verifier,
+                    attestation_verifier,
                 )
                 .await
                 {
@@ -467,12 +464,13 @@ impl<L: QuoteGenerator, R: QuoteVerifier> ProxyClient<L, R> {
         connector: TlsConnector,
         target: String,
         cert_chain: Option<Vec<CertificateDer<'static>>>,
-        local_quote_generator: L,
-        remote_quote_verifier: R,
+        local_quote_generator: Arc<dyn QuoteGenerator>,
+        attestation_verifier: AttestationVerifier,
     ) -> Result<
         (
             tokio_rustls::client::TlsStream<TcpStream>,
             Option<Measurements>,
+            AttestationType,
         ),
         ProxyError,
     > {
@@ -502,13 +500,19 @@ impl<L: QuoteGenerator, R: QuoteVerifier> ProxyClient<L, R> {
         let mut buf = vec![0; length];
         tls_stream.read_exact(&mut buf).await?;
 
-        let measurements = remote_quote_verifier
-            .verify_attestation(buf, &remote_cert_chain, exporter)
+        let remote_attestation_payload: AttesationPayload = serde_json::from_slice(&buf)?;
+        let remote_attestation_type = remote_attestation_payload.attestation_type;
+
+        let measurements = attestation_verifier
+            .verify_attestation(remote_attestation_payload, &remote_cert_chain, exporter)
             .await?;
 
         let attestation = if local_quote_generator.attestation_type() != AttestationType::None {
-            local_quote_generator
-                .create_attestation(&cert_chain.ok_or(ProxyError::NoClientAuth)?, exporter)?
+            serde_json::to_vec(&AttesationPayload::from_attestation_generator(
+                &cert_chain.ok_or(ProxyError::NoClientAuth)?,
+                exporter,
+                local_quote_generator,
+            )?)?
         } else {
             Vec::new()
         };
@@ -519,7 +523,7 @@ impl<L: QuoteGenerator, R: QuoteVerifier> ProxyClient<L, R> {
 
         tls_stream.write_all(&attestation).await?;
 
-        Ok((tls_stream, measurements))
+        Ok((tls_stream, measurements, remote_attestation_type))
     }
 
     // Handle a request from the source client to the proxy server
@@ -528,17 +532,15 @@ impl<L: QuoteGenerator, R: QuoteVerifier> ProxyClient<L, R> {
         connector: TlsConnector,
         target: String,
         cert_chain: Option<Vec<CertificateDer<'static>>>,
-        local_quote_generator: L,
-        remote_quote_verifier: R,
+        local_quote_generator: Arc<dyn QuoteGenerator>,
+        attestation_verifier: AttestationVerifier,
     ) -> Result<Response<BoxBody<bytes::Bytes, hyper::Error>>, ProxyError> {
-        let remote_attestation_type = remote_quote_verifier.attestation_type();
-
-        let (tls_stream, measurements) = Self::setup_connection(
+        let (tls_stream, measurements, remote_attestation_type) = Self::setup_connection(
             connector,
             target,
             cert_chain,
             local_quote_generator,
-            remote_quote_verifier,
+            attestation_verifier,
         )
         .await?;
 
@@ -587,20 +589,20 @@ impl<L: QuoteGenerator, R: QuoteVerifier> ProxyClient<L, R> {
 }
 
 /// Just get the attested remote certificate, with no client authentication
-pub async fn get_tls_cert<R: QuoteVerifier>(
+pub async fn get_tls_cert(
     server_name: String,
-    remote_quote_verifier: R,
+    attestation_verifier: AttestationVerifier,
 ) -> Result<Vec<CertificateDer<'static>>, ProxyError> {
     let root_store = RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
     let client_config = ClientConfig::builder()
         .with_root_certificates(root_store)
         .with_no_client_auth();
-    get_tls_cert_with_config(server_name, remote_quote_verifier, client_config.into()).await
+    get_tls_cert_with_config(server_name, attestation_verifier, client_config.into()).await
 }
 
-async fn get_tls_cert_with_config<R: QuoteVerifier>(
+async fn get_tls_cert_with_config(
     server_name: String,
-    remote_quote_verifier: R,
+    attestation_verifier: AttestationVerifier,
     client_config: Arc<ClientConfig>,
 ) -> Result<Vec<CertificateDer<'static>>, ProxyError> {
     let connector = TlsConnector::from(client_config);
@@ -631,8 +633,10 @@ async fn get_tls_cert_with_config<R: QuoteVerifier>(
     let mut buf = vec![0; length];
     tls_stream.read_exact(&mut buf).await?;
 
-    let _measurements = remote_quote_verifier
-        .verify_attestation(buf, &remote_cert_chain, exporter)
+    let remote_attestation_payload: AttesationPayload = serde_json::from_slice(&buf)?;
+
+    let _measurements = attestation_verifier
+        .verify_attestation(remote_attestation_payload, &remote_cert_chain, exporter)
         .await?;
 
     Ok(remote_cert_chain)
@@ -659,6 +663,8 @@ pub enum ProxyError {
     BadDnsName(#[from] tokio_rustls::rustls::pki_types::InvalidDnsNameError),
     #[error("HTTP: {0}")]
     Hyper(#[from] hyper::Error),
+    #[error("JSON: {0}")]
+    Json(#[from] serde_json::Error),
 }
 
 /// Given a byte array, encode its length as a 4 byte big endian u32
@@ -690,8 +696,6 @@ fn server_name_from_host(
 
 #[cfg(test)]
 mod tests {
-    use crate::attestation::CvmImageMeasurements;
-
     use super::*;
     use test_helpers::{
         default_measurements, example_http_service, example_service, generate_certificate_chain,
@@ -710,26 +714,15 @@ mod tests {
             server_config,
             "127.0.0.1:0",
             target_addr,
-            DcapTdxQuoteGenerator {
-                attestation_type: AttestationType::Dummy,
-            },
-            NoQuoteVerifier,
+            Arc::new(DcapTdxQuoteGenerator {
+                attestation_type: AttestationType::DcapTdx,
+            }),
+            AttestationVerifier::do_not_verify(),
         )
         .await
         .unwrap();
 
         let proxy_addr = proxy_server.local_addr().unwrap();
-
-        let quote_verifier = DcapTdxQuoteVerifier {
-            attestation_type: AttestationType::Dummy,
-            accepted_platform_measurements: None,
-            accepted_cvm_image_measurements: vec![CvmImageMeasurements {
-                rtmr1: [0u8; 48],
-                rtmr2: [0u8; 48],
-                rtmr3: [0u8; 48],
-            }],
-            pccs_url: None,
-        };
 
         tokio::spawn(async move {
             proxy_server.accept().await.unwrap();
@@ -739,8 +732,8 @@ mod tests {
             client_config,
             "127.0.0.1:0".to_string(),
             proxy_addr.to_string(),
-            NoQuoteGenerator,
-            quote_verifier,
+            Arc::new(NoQuoteGenerator),
+            AttestationVerifier::mock(),
             None,
         )
         .await
@@ -766,7 +759,7 @@ mod tests {
             .unwrap()
             .to_str()
             .unwrap();
-        assert_eq!(attestation_type, AttestationType::Dummy.as_str());
+        assert_eq!(attestation_type, AttestationType::DcapTdx.as_str());
 
         let res_body = res.text().await.unwrap();
         assert_eq!(res_body, "No measurements");
@@ -791,26 +784,15 @@ mod tests {
             server_private_key,
         );
 
-        let quote_verifier = DcapTdxQuoteVerifier {
-            attestation_type: AttestationType::Dummy,
-            accepted_platform_measurements: None,
-            accepted_cvm_image_measurements: vec![CvmImageMeasurements {
-                rtmr1: [0u8; 48],
-                rtmr2: [0u8; 48],
-                rtmr3: [0u8; 48],
-            }],
-            pccs_url: None,
-        };
-
         let proxy_server = ProxyServer::new_with_tls_config(
             server_cert_chain,
             server_tls_server_config,
             "127.0.0.1:0",
             target_addr,
-            DcapTdxQuoteGenerator {
-                attestation_type: AttestationType::Dummy,
-            },
-            quote_verifier.clone(),
+            Arc::new(DcapTdxQuoteGenerator {
+                attestation_type: AttestationType::DcapTdx,
+            }),
+            AttestationVerifier::mock(),
         )
         .await
         .unwrap();
@@ -825,10 +807,10 @@ mod tests {
             client_tls_client_config,
             "127.0.0.1:0",
             proxy_addr.to_string(),
-            DcapTdxQuoteGenerator {
-                attestation_type: AttestationType::Dummy,
-            },
-            quote_verifier,
+            Arc::new(DcapTdxQuoteGenerator {
+                attestation_type: AttestationType::DcapTdx,
+            }),
+            AttestationVerifier::mock(),
             Some(client_cert_chain),
         )
         .await
@@ -854,7 +836,7 @@ mod tests {
             .unwrap()
             .to_str()
             .unwrap();
-        assert_eq!(attestation_type, AttestationType::Dummy.as_str());
+        assert_eq!(attestation_type, AttestationType::DcapTdx.as_str());
 
         let res_body = res.text().await.unwrap();
 
@@ -876,10 +858,10 @@ mod tests {
             server_config,
             "127.0.0.1:0",
             target_addr,
-            DcapTdxQuoteGenerator {
-                attestation_type: AttestationType::Dummy,
-            },
-            NoQuoteVerifier,
+            Arc::new(DcapTdxQuoteGenerator {
+                attestation_type: AttestationType::DcapTdx,
+            }),
+            AttestationVerifier::do_not_verify(),
         )
         .await
         .unwrap();
@@ -890,21 +872,13 @@ mod tests {
             proxy_server.accept().await.unwrap();
         });
 
-        let quote_verifier = DcapTdxQuoteVerifier {
-            attestation_type: AttestationType::Dummy,
-            accepted_platform_measurements: None,
-            accepted_cvm_image_measurements: vec![CvmImageMeasurements {
-                rtmr1: [0u8; 48],
-                rtmr2: [0u8; 48],
-                rtmr3: [0u8; 48],
-            }],
-            pccs_url: None,
-        };
-
-        let retrieved_chain =
-            get_tls_cert_with_config(proxy_server_addr.to_string(), quote_verifier, client_config)
-                .await
-                .unwrap();
+        let retrieved_chain = get_tls_cert_with_config(
+            proxy_server_addr.to_string(),
+            AttestationVerifier::mock(),
+            client_config,
+        )
+        .await
+        .unwrap();
 
         assert_eq!(retrieved_chain, cert_chain);
     }

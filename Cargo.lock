@@ -146,6 +146,7 @@ dependencies = [
  "rcgen",
  "reqwest",
  "rustls-pemfile",
+ "serde",
  "serde_json",
  "sha2",
  "tdx-quote",
