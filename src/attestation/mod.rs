@@ -24,7 +24,7 @@ const PCS_URL: &str = "https://api.trustedservices.intel.com";
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct AttesationPayload {
-    pub attestation_type: String, // TODO should be AttestationType
+    pub attestation_type: AttestationType,
     pub attestation: Vec<u8>,
 }
 
@@ -35,7 +35,7 @@ impl AttesationPayload {
         attesation_generator: Arc<dyn QuoteGenerator>,
     ) -> Result<Self, AttestationError> {
         Ok(Self {
-            attestation_type: attesation_generator.attestation_type().as_str().to_string(),
+            attestation_type: attesation_generator.attestation_type(),
             attestation: attesation_generator.create_attestation(cert_chain, exporter)?,
         })
     }
@@ -43,7 +43,8 @@ impl AttesationPayload {
 
 /// Type of attestaion used
 /// Only supported (or soon-to-be supported) types are given
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum AttestationType {
     /// No attestion
     None,
@@ -72,17 +73,17 @@ impl AttestationType {
         }
     }
 
-    pub fn parse_from_str(input: &str) -> Result<Self, AttestationError> {
-        match input {
-            "none" => Ok(Self::None),
-            "dummy" => Ok(Self::Dummy),
-            "azure-tdx" => Ok(Self::AzureTdx),
-            "qemu-tdx" => Ok(Self::QemuTdx),
-            "dcap-tdx" => Ok(Self::DcapTdx),
-            "gcp-tdx" => Ok(Self::GcpTdx),
-            _ => Err(AttestationError::AttestationTypeNotSupported),
-        }
-    }
+    // pub fn parse_from_str(input: &str) -> Result<Self, AttestationError> {
+    //     match input {
+    //         "none" => Ok(Self::None),
+    //         "dummy" => Ok(Self::Dummy),
+    //         "azure-tdx" => Ok(Self::AzureTdx),
+    //         "qemu-tdx" => Ok(Self::QemuTdx),
+    //         "dcap-tdx" => Ok(Self::DcapTdx),
+    //         "gcp-tdx" => Ok(Self::GcpTdx),
+    //         _ => Err(AttestationError::AttestationTypeNotSupported),
+    //     }
+    // }
 
     pub fn get_quote_generator(&self) -> Result<Arc<dyn QuoteGenerator>, AttestationError> {
         match self {
@@ -154,8 +155,7 @@ impl AttestationVerifier {
         cert_chain: &[CertificateDer<'_>],
         exporter: [u8; 32],
     ) -> Result<Option<Measurements>, AttestationError> {
-        let attestation_type =
-            AttestationType::parse_from_str(&attestation_payload.attestation_type)?;
+        let attestation_type = attestation_payload.attestation_type;
 
         let measurements = match attestation_type {
             AttestationType::DcapTdx => {

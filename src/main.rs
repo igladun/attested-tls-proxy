@@ -137,8 +137,8 @@ async fn main() -> anyhow::Result<()> {
                 None => AttestationVerifier::do_not_verify(),
             };
 
-            let client_attestation_type = AttestationType::parse_from_str(
-                &client_attestation_type.unwrap_or("none".to_string()),
+            let client_attestation_type: AttestationType = serde_json::from_value(
+                serde_json::Value::String(client_attestation_type.unwrap_or("none".to_string())),
             )?;
 
             let client_attestation_generator = client_attestation_type.get_quote_generator()?;
@@ -170,8 +170,8 @@ async fn main() -> anyhow::Result<()> {
             let tls_cert_and_chain =
                 load_tls_cert_and_key(tls_certificate_path, tls_private_key_path)?;
 
-            let server_attestation_type = AttestationType::parse_from_str(
-                &server_attestation_type.unwrap_or("none".to_string()),
+            let server_attestation_type: AttestationType = serde_json::from_value(
+                serde_json::Value::String(server_attestation_type.unwrap_or("none".to_string())),
             )?;
 
             let local_attestation_generator = server_attestation_type.get_quote_generator()?;

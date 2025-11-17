@@ -210,7 +210,7 @@ impl ProxyServer {
         {
             let remote_attestation_payload: AttesationPayload = serde_json::from_slice(&buf)?;
 
-            let remote_attestation_type = remote_attestation_payload.attestation_type.clone();
+            let remote_attestation_type = remote_attestation_payload.attestation_type;
             (
                 attestation_verifier
                     .verify_attestation(
@@ -222,7 +222,7 @@ impl ProxyServer {
                 remote_attestation_type,
             )
         } else {
-            (None, AttestationType::None.to_string())
+            (None, AttestationType::None)
         };
 
         let http = Builder::new();
@@ -501,8 +501,7 @@ impl ProxyClient {
         tls_stream.read_exact(&mut buf).await?;
 
         let remote_attestation_payload: AttesationPayload = serde_json::from_slice(&buf)?;
-        let remote_attestation_type =
-            AttestationType::parse_from_str(&remote_attestation_payload.attestation_type)?;
+        let remote_attestation_type = remote_attestation_payload.attestation_type;
 
         let measurements = attestation_verifier
             .verify_attestation(remote_attestation_payload, &remote_cert_chain, exporter)

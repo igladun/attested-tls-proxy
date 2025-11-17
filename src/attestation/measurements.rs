@@ -174,8 +174,10 @@ pub async fn get_measurements_from_file(
     for measurement in measurements_simple {
         measurements.push(MeasurementRecord {
             measurement_id: measurement.measurement_id,
-            attestation_type: AttestationType::parse_from_str(&measurement.attestation_type)
-                .map_err(|_| MeasurementFormatError::AttestationTypeNotValid)?,
+            attestation_type: serde_json::from_value(serde_json::Value::String(
+                measurement.attestation_type,
+            ))
+            .map_err(|_| MeasurementFormatError::AttestationTypeNotValid)?,
             measurements: Measurements {
                 platform: PlatformMeasurements {
                     mrtd: hex::decode(&measurement.measurements["0"].expected)?
