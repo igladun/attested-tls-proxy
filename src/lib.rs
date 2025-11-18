@@ -41,6 +41,7 @@ type RequestWithResponseSender = (
     http::Request<hyper::body::Incoming>,
     oneshot::Sender<Result<Response<BoxBody<bytes::Bytes, hyper::Error>>, hyper::Error>>,
 );
+type Http2Sender = hyper::client::conn::http2::SendRequest<hyper::body::Incoming>;
 
 /// TLS Credentials
 pub struct TlsCertAndKey {
@@ -50,19 +51,14 @@ pub struct TlsCertAndKey {
     pub key: PrivateKeyDer<'static>,
 }
 
-/// Inner struct used by [ProxyClient] and [ProxyServer]
-struct Proxy {
+/// A TLS over TCP server which provides an attestation before forwarding traffic to a given target address
+pub struct ProxyServer {
     /// The underlying TCP listener
     listener: TcpListener,
     /// Quote generation type to use (including none)
     local_quote_generator: Arc<dyn QuoteGenerator>,
     /// Verifier for remote attestation (including none)
     attestation_verifier: AttestationVerifier,
-}
-
-/// A TLS over TCP server which provides an attestation before forwarding traffic to a given target address
-pub struct ProxyServer {
-    inner: Proxy,
     /// The certificate chain
     cert_chain: Vec<CertificateDer<'static>>,
     /// For accepting TLS connections
@@ -123,29 +119,25 @@ impl ProxyServer {
         let acceptor = tokio_rustls::TlsAcceptor::from(server_config);
         let listener = TcpListener::bind(local).await?;
 
-        let inner = Proxy {
+        Ok(Self {
             listener,
             local_quote_generator,
             attestation_verifier,
-        };
-
-        Ok(Self {
             acceptor,
             target,
-            inner,
             cert_chain,
         })
     }
 
     /// Accept an incoming connection
     pub async fn accept(&self) -> Result<(), ProxyError> {
-        let (inbound, _client_addr) = self.inner.listener.accept().await?;
+        let (inbound, _client_addr) = self.listener.accept().await?;
 
         let acceptor = self.acceptor.clone();
         let target = self.target;
         let cert_chain = self.cert_chain.clone();
-        let local_quote_generator = self.inner.local_quote_generator.clone();
-        let attestation_verifier = self.inner.attestation_verifier.clone();
+        let local_quote_generator = self.local_quote_generator.clone();
+        let attestation_verifier = self.attestation_verifier.clone();
         tokio::spawn(async move {
             if let Err(err) = Self::handle_connection(
                 inbound,
@@ -166,7 +158,7 @@ impl ProxyServer {
 
     /// Helper to get the socket address of the underlying TCP listener
     pub fn local_addr(&self) -> std::io::Result<SocketAddr> {
-        self.inner.listener.local_addr()
+        self.listener.local_addr()
     }
 
     async fn handle_connection(
@@ -380,29 +372,6 @@ impl ProxyClient {
 
         let target = host_to_host_with_port(&target_name);
 
-        // Connect to the proxy server
-        // TODO this should run in a loop, reconnecting when the connection is lost
-        let (tls_stream, measurements, remote_attestation_type) = Self::setup_connection(
-            connector.clone(),
-            target,
-            cert_chain.clone(),
-            local_quote_generator,
-            attestation_verifier,
-        )
-        .await?;
-
-        let outbound_io = TokioIo::new(tls_stream);
-        let (mut sender, conn) = hyper::client::conn::http2::Builder::new(TokioExecutor)
-            .handshake::<_, hyper::body::Incoming>(outbound_io)
-            .await?;
-
-        // Drive the connection
-        tokio::spawn(async move {
-            if let Err(e) = conn.await {
-                eprintln!("Client connection error: {e}");
-            }
-        });
-
         // Channel for getting incoming requests from the source client
         let (requests_tx, mut requests_rx) = mpsc::channel::<(
             http::Request<hyper::body::Incoming>,
@@ -411,9 +380,19 @@ impl ProxyClient {
             >,
         )>(1024);
 
+        // Connect to the proxy server
+        let (mut sender, mut measurements, mut remote_attestation_type) = Self::setup_connection(
+            connector.clone(),
+            target.clone(),
+            cert_chain.clone(),
+            local_quote_generator.clone(),
+            attestation_verifier.clone(),
+        )
+        .await?;
+
         tokio::spawn(async move {
             while let Some((req, response_tx)) = requests_rx.recv().await {
-                let resp = match sender.send_request(req).await {
+                let (response, should_reconnect) = match sender.send_request(req).await {
                     Ok(mut resp) => {
                         if let Some(measurements) = measurements.clone() {
                             let headers = resp.headers_mut();
@@ -433,19 +412,35 @@ impl ProxyClient {
                                 .expect("Attestation type should be able to be encoded as a header value"),
                             );
                         }
-                        Ok(resp.map(|b| b.boxed()))
+                        (Ok(resp.map(|b| b.boxed())), false)
                     }
                     Err(e) => {
                         eprintln!("Failed to send request to proxy-server: {e}");
                         let mut resp = Response::new(full(format!("Request failed: {e}")));
                         *resp.status_mut() = hyper::StatusCode::BAD_GATEWAY;
-                        Ok(resp)
+
+                        (Ok(resp), true)
                     }
                 };
 
                 // Send the response back to the source client
-                if response_tx.send(resp).is_err() {
+                if response_tx.send(response).is_err() {
                     eprintln!("Failed to forward response to source client, probably they dropped the connection");
+                }
+
+                // If the connection to the proxy server failed, reconnect
+                if should_reconnect {
+                    // Reconnect to the server
+                    // TODO the error should be handled in a backoff loop
+                    (sender, measurements, remote_attestation_type) = Self::setup_connection(
+                        connector.clone(),
+                        target.clone(),
+                        cert_chain.clone(),
+                        local_quote_generator.clone(),
+                        attestation_verifier.clone(),
+                    )
+                    .await
+                    .unwrap();
                 }
             }
         });
@@ -511,14 +506,7 @@ impl ProxyClient {
         cert_chain: Option<Vec<CertificateDer<'static>>>,
         local_quote_generator: Arc<dyn QuoteGenerator>,
         attestation_verifier: AttestationVerifier,
-    ) -> Result<
-        (
-            tokio_rustls::client::TlsStream<TcpStream>,
-            Option<Measurements>,
-            AttestationType,
-        ),
-        ProxyError,
-    > {
+    ) -> Result<(Http2Sender, Option<Measurements>, AttestationType), ProxyError> {
         let out = TcpStream::connect(&target).await?;
         let mut tls_stream = connector
             .connect(server_name_from_host(&target)?, out)
@@ -568,7 +556,21 @@ impl ProxyClient {
 
         tls_stream.write_all(&attestation).await?;
 
-        Ok((tls_stream, measurements, remote_attestation_type))
+        // Attestation is complete - now seturn an HTTP client
+
+        let outbound_io = TokioIo::new(tls_stream);
+        let (sender, conn) = hyper::client::conn::http2::Builder::new(TokioExecutor)
+            .handshake::<_, hyper::body::Incoming>(outbound_io)
+            .await?;
+
+        // Drive the connection
+        tokio::spawn(async move {
+            if let Err(e) = conn.await {
+                eprintln!("Client connection error: {e}");
+            }
+        });
+
+        Ok((sender, measurements, remote_attestation_type))
     }
 
     // Handle a request from the source client to the proxy server
