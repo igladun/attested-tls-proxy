@@ -107,6 +107,7 @@ pub trait QuoteGenerator: Send + Sync + 'static {
 #[derive(Clone, Debug)]
 pub struct AttestationVerifier {
     accepted_measurements: Vec<MeasurementRecord>,
+    pccs_url: Option<String>,
 }
 
 impl AttestationVerifier {
@@ -114,6 +115,7 @@ impl AttestationVerifier {
     pub fn do_not_verify() -> Self {
         Self {
             accepted_measurements: Vec::new(),
+            pccs_url: None,
         }
     }
 
@@ -136,6 +138,7 @@ impl AttestationVerifier {
                     },
                 },
             }],
+            pccs_url: None,
         }
     }
 
@@ -150,8 +153,13 @@ impl AttestationVerifier {
 
         let measurements = match attestation_type {
             AttestationType::DcapTdx => {
-                verify_dcap_attestation(attestation_payload.attestation, cert_chain, exporter, None)
-                    .await?
+                verify_dcap_attestation(
+                    attestation_payload.attestation,
+                    cert_chain,
+                    exporter,
+                    self.pccs_url.clone(),
+                )
+                .await?
             }
             AttestationType::None => {
                 if attestation_payload.attestation.is_empty() {
@@ -223,7 +231,7 @@ async fn verify_dcap_attestation(
             &pccs_url.clone().unwrap_or(PCS_URL.to_string()),
             fmspc,
             ca,
-            false,
+            false, // Indicates not SGX
         )
         .await?;
 

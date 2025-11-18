@@ -204,6 +204,7 @@ pub async fn get_measurements_from_file(
 
     Ok(AttestationVerifier {
         accepted_measurements: measurements,
+        pccs_url: None,
     })
 }
 
