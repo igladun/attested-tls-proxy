@@ -6,7 +6,6 @@ use bytes::Bytes;
 use http::HeaderValue;
 use http_body_util::combinators::BoxBody;
 use http_body_util::BodyExt;
-use hyper::server::conn::http1::Builder;
 use hyper::service::service_fn;
 use hyper::Response;
 use hyper_util::rt::TokioIo;
@@ -144,7 +143,7 @@ impl ProxyServer {
         let attestation_verifier = self.inner.attestation_verifier.clone();
         tokio::spawn(async move {
             if let Err(err) = Self::handle_connection(
-                inbound, // TODO should be AttestationType
+                inbound,
                 acceptor,
                 target,
                 cert_chain,
@@ -160,6 +159,7 @@ impl ProxyServer {
         Ok(())
     }
 
+    /// Helper to get the socket address of the underlying TCP listener
     pub fn local_addr(&self) -> std::io::Result<SocketAddr> {
         self.inner.listener.local_addr()
     }
@@ -226,7 +226,7 @@ impl ProxyServer {
             (None, AttestationType::None)
         };
 
-        let http = Builder::new();
+        let http = hyper::server::conn::http2::Builder::new(TokioExecutor);
         let service = service_fn(move |mut req| {
             // If we have measurements, add them to the request header
             let measurements = measurements.clone();
@@ -245,7 +245,8 @@ impl ProxyServer {
                 }
                 headers.insert(
                     ATTESTATION_TYPE_HEADER,
-                    HeaderValue::from_str(remote_attestation_type.as_str()).unwrap(),
+                    HeaderValue::from_str(remote_attestation_type.as_str())
+                        .expect("Attestation type should be able to be encoded as a header value"),
                 );
             }
 
@@ -255,7 +256,7 @@ impl ProxyServer {
                         Ok::<Response<BoxBody<bytes::Bytes, hyper::Error>>, hyper::Error>(res)
                     }
                     Err(e) => {
-                        eprintln!("send_request error: {e}");
+                        eprintln!("Failed to handle a request from a proxy-client: {e}");
                         let mut resp = Response::new(full(format!("Request failed: {e}")));
                         *resp.status_mut() = hyper::StatusCode::BAD_GATEWAY;
                         Ok(resp)
@@ -306,12 +307,7 @@ fn full<T: Into<Bytes>>(chunk: T) -> BoxBody<Bytes, hyper::Error> {
 }
 
 pub struct ProxyClient {
-    inner: Proxy,
-    // connector: TlsConnector,
-    // /// The host and port of the proxy server
-    // target: String,
-    // /// Certificate chain for client auth
-    // cert_chain: Option<Vec<CertificateDer<'static>>>
+    listener: TcpListener,
     requests_tx: mpsc::Sender<(
         http::Request<hyper::body::Incoming>,
         oneshot::Sender<Result<http::Response<BoxBody<bytes::Bytes, hyper::Error>>, hyper::Error>>,
@@ -380,12 +376,6 @@ impl ProxyClient {
         let listener = TcpListener::bind(local).await?;
         let connector = TlsConnector::from(client_config.clone());
 
-        let inner = Proxy {
-            listener,
-            local_quote_generator: local_quote_generator.clone(),
-            attestation_verifier: attestation_verifier.clone(),
-        };
-
         let target = host_to_host_with_port(&target_name);
 
         // TODO connect to server and attest
@@ -402,7 +392,7 @@ impl ProxyClient {
         .await?;
 
         let outbound_io = TokioIo::new(tls_stream);
-        let (mut sender, conn) = hyper::client::conn::http1::Builder::new()
+        let (mut sender, conn) = hyper::client::conn::http2::Builder::new(TokioExecutor)
             .handshake::<_, hyper::body::Incoming>(outbound_io)
             .await?;
 
@@ -457,7 +447,7 @@ impl ProxyClient {
         });
 
         Ok(Self {
-            inner,
+            listener,
             // connector,
             // target: host_to_host_with_port(&target_name),
             // cert_chain,
@@ -467,12 +457,12 @@ impl ProxyClient {
 
     /// Helper to return the local socket address from the underlying TCP listener
     pub fn local_addr(&self) -> std::io::Result<SocketAddr> {
-        self.inner.listener.local_addr()
+        self.listener.local_addr()
     }
 
     /// Accept an incoming connection and handle it in a separate task
     pub async fn accept(&self) -> io::Result<()> {
-        let (inbound, _client_addr) = self.inner.listener.accept().await?;
+        let (inbound, _client_addr) = self.listener.accept().await?;
 
         let requests_tx = self.requests_tx.clone();
 
@@ -493,7 +483,7 @@ impl ProxyClient {
             oneshot::Sender<Result<Response<BoxBody<bytes::Bytes, hyper::Error>>, hyper::Error>>,
         )>,
     ) -> Result<(), ProxyError> {
-        let http = Builder::new();
+        let http = hyper::server::conn::http1::Builder::new();
         let service = service_fn(move |req| {
             let requests_tx = requests_tx.clone();
             async move {
@@ -701,6 +691,22 @@ fn server_name_from_host(
     let host_part = host_part.trim_matches(|c| c == '[' || c == ']');
 
     ServerName::try_from(host_part.to_string())
+}
+
+/// An Executor for hyper that uses the tokio runtime
+#[derive(Clone)]
+struct TokioExecutor;
+
+// Implement the `hyper::rt::Executor` trait for `TokioExecutor` so that it can be used to spawn
+// tasks in the hyper runtime.
+impl<F> hyper::rt::Executor<F> for TokioExecutor
+where
+    F: std::future::Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    fn execute(&self, fut: F) {
+        tokio::task::spawn(fut);
+    }
 }
 
 #[cfg(test)]
