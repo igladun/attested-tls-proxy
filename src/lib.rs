@@ -37,6 +37,11 @@ const ATTESTATION_TYPE_HEADER: &str = "X-Flashbots-Attestation-Type";
 /// The header name for giving measurements
 const MEASUREMENT_HEADER: &str = "X-Flashbots-Measurement";
 
+type RequestWithResponseSender = (
+    http::Request<hyper::body::Incoming>,
+    oneshot::Sender<Result<Response<BoxBody<bytes::Bytes, hyper::Error>>, hyper::Error>>,
+);
+
 /// TLS Credentials
 pub struct TlsCertAndKey {
     /// Der-encoded TLS certificate chain
@@ -308,10 +313,7 @@ fn full<T: Into<Bytes>>(chunk: T) -> BoxBody<Bytes, hyper::Error> {
 
 pub struct ProxyClient {
     listener: TcpListener,
-    requests_tx: mpsc::Sender<(
-        http::Request<hyper::body::Incoming>,
-        oneshot::Sender<Result<http::Response<BoxBody<bytes::Bytes, hyper::Error>>, hyper::Error>>,
-    )>,
+    requests_tx: mpsc::Sender<RequestWithResponseSender>,
 }
 
 impl ProxyClient {
@@ -362,7 +364,7 @@ impl ProxyClient {
         .await
     }
 
-    /// Create a new proxy with given TLS configuration
+    /// Create a new proxy client with given TLS configuration
     ///
     /// This is private as it allows dangerous configuration but is used in tests
     async fn new_with_tls_config(
@@ -378,10 +380,8 @@ impl ProxyClient {
 
         let target = host_to_host_with_port(&target_name);
 
-        // TODO connect to server and attest
-        // start run loop with channels
-        // return struct with sender
-        //
+        // Connect to the proxy server
+        // TODO this should run in a loop, reconnecting when the connection is lost
         let (tls_stream, measurements, remote_attestation_type) = Self::setup_connection(
             connector.clone(),
             target,
@@ -429,28 +429,29 @@ impl ProxyClient {
                             }
                             headers.insert(
                                 ATTESTATION_TYPE_HEADER,
-                                HeaderValue::from_str(remote_attestation_type.as_str()).unwrap(),
+                                HeaderValue::from_str(remote_attestation_type.as_str())
+                                .expect("Attestation type should be able to be encoded as a header value"),
                             );
                         }
                         Ok(resp.map(|b| b.boxed()))
                     }
                     Err(e) => {
-                        eprintln!("send_request error: {e}");
+                        eprintln!("Failed to send request to proxy-server: {e}");
                         let mut resp = Response::new(full(format!("Request failed: {e}")));
                         *resp.status_mut() = hyper::StatusCode::BAD_GATEWAY;
                         Ok(resp)
                     }
                 };
+
                 // Send the response back to the source client
-                response_tx.send(resp).unwrap();
+                if response_tx.send(resp).is_err() {
+                    eprintln!("Failed to forward response to source client, probably they dropped the connection");
+                }
             }
         });
 
         Ok(Self {
             listener,
-            // connector,
-            // target: host_to_host_with_port(&target_name),
-            // cert_chain,
             requests_tx,
         })
     }
@@ -478,10 +479,7 @@ impl ProxyClient {
     /// Handle an incoming connection
     async fn handle_connection(
         inbound: TcpStream,
-        requests_tx: mpsc::Sender<(
-            http::Request<hyper::body::Incoming>,
-            oneshot::Sender<Result<Response<BoxBody<bytes::Bytes, hyper::Error>>, hyper::Error>>,
-        )>,
+        requests_tx: mpsc::Sender<RequestWithResponseSender>,
     ) -> Result<(), ProxyError> {
         let http = hyper::server::conn::http1::Builder::new();
         let service = service_fn(move |req| {
@@ -576,14 +574,11 @@ impl ProxyClient {
     // Handle a request from the source client to the proxy server
     async fn handle_http_request(
         req: hyper::Request<hyper::body::Incoming>,
-        requests_tx: mpsc::Sender<(
-            http::Request<hyper::body::Incoming>,
-            oneshot::Sender<Result<Response<BoxBody<bytes::Bytes, hyper::Error>>, hyper::Error>>,
-        )>,
+        requests_tx: mpsc::Sender<RequestWithResponseSender>,
     ) -> Result<Response<BoxBody<bytes::Bytes, hyper::Error>>, ProxyError> {
         let (response_tx, response_rx) = oneshot::channel();
-        requests_tx.send((req, response_tx)).await.unwrap();
-        Ok(response_rx.await.unwrap()?)
+        requests_tx.send((req, response_tx)).await?;
+        Ok(response_rx.await??)
     }
 }
 
@@ -664,6 +659,16 @@ pub enum ProxyError {
     Hyper(#[from] hyper::Error),
     #[error("JSON: {0}")]
     Json(#[from] serde_json::Error),
+    #[error("Could not forward response - sender was dropped")]
+    OneShotRecv(#[from] oneshot::error::RecvError),
+    #[error("Failed to send request, connection to proxy-server dropped")]
+    MpscSend,
+}
+
+impl From<mpsc::error::SendError<RequestWithResponseSender>> for ProxyError {
+    fn from(_err: mpsc::error::SendError<RequestWithResponseSender>) -> Self {
+        Self::MpscSend
+    }
 }
 
 /// Given a byte array, encode its length as a 4 byte big endian u32
