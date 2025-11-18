@@ -538,6 +538,7 @@ impl ProxyClient {
         }
     }
 
+    /// Connect to the proxy-server, do TLS handshake and remote attestation
     async fn setup_connection(
         connector: TlsConnector,
         target: String,
