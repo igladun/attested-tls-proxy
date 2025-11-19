@@ -40,6 +40,13 @@ impl AttesationPayload {
             attestation: attesation_generator.create_attestation(cert_chain, exporter)?,
         })
     }
+
+    pub fn without_attestation() -> Self {
+        Self {
+            attestation_type: AttestationType::None,
+            attestation: Vec::new(),
+        }
+    }
 }
 
 /// Type of attestaion used
