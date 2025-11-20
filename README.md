@@ -2,16 +2,14 @@
 # `attested-tls-proxy`
 
 This is a work-in-progress crate designed to be an alternative to [`cvm-reverse-proxy`](https://github.com/flashbots/cvm-reverse-proxy).
+Unlike `cvm-reverse-proxy`, this uses post-handshake remote-attested TLS, meaning regular CA-signed TLS certificates can be used.
 
 It has three subcommands:
 - `attested-tls-proxy server` - run a proxy server, which accepts TLS connections from a proxy client, sends an attestation and then forwards traffic to a target CVM service.
 - `attested-tls-proxy client` - run a proxy client, which accepts connections from elsewhere, connects to and verifies the attestation from the proxy server, and then forwards traffic to it over TLS.
 - `attested-tls-proxy get-tls-cert` - connects to a proxy-server, verify the attestation, and if successful write the server's PEM-encoded TLS certificate chain to standard out. This can be used to make subsequent connections to services using this certificate over regular TLS.
 
-Unlike `cvm-reverse-proxy`, this uses post-handshake remote-attested TLS, meaning regular CA-signed TLS certificates can be used.
-
-
-### Overview
+### How it works
 
 This is a reverse HTTP proxy allowing a normal HTTP client to communicate with a normal HTTP server over a remote-attested TLS channel, by tunneling requests through a proxy-client and proxy-server.
 
@@ -27,10 +25,12 @@ One or both of the proxy-client and proxy-server may be running in a confidentia
 
 Accepted measurements for the remote party are specified in a JSON file containing an array of objects, each of which specifies an accepted attestation type and set of measurements.
 
+This aims to match the formatting used by `cvm-reverse-proxy`.
+
 These object have the following fields:
 - `measurement_id` - a name used to describe the entry. For example the name and version of the CVM OS image that these measurements correspond to.
-- `attestation_type` - one of the attestation types (confidential computing platforms) described below. 
-- `measurements` - an object with fields referring to the five measurement registers.
+- `attestation_type` - a string containing one of the attestation types (confidential computing platforms) described below. 
+- `measurements` - an object with fields referring to the five measurement registers. Field names are the same as for the measurement headers (see below).
 
 Example:
 
@@ -60,9 +60,13 @@ Example:
 ]
 ```
 
+If a path to this file is not given or it contains an empty array, **any** attestation type and **any** measurements will be accepted, **including no attestation**. The measurements can still be checked up-stream by the source client or target service using header injection described below. But it is then up to these external programs to reject unacceptable configurations. 
+
 ### Measurement Headers
 
-When attestation is validated successfully, the following values are injected into the request / response headers making them available to the source client and/or target service:
+When attestation is validated successfully, the following headers are injected into the HTTP request / response making them available to the source client and/or target service.
+
+These aim to match the header formatting used by `cvm-reverse-proxy`.
 
 Header name: `X-Flashbots-Measurement`
 
@@ -79,10 +83,32 @@ Header value:
 
 Header name: `X-Flashbots-Attestation-Type`
 
-Header value:
+Header value: an attestation type given as a string as described below.
+  
+## Attestation Types
 
-One of `none`, `dummy`, `azure-tdx`, `qemu-tdx`, `gcp-tdx`.
+These are the attestation type names used in the HTTP headers, and the measurements file, and when specifying a local attestation type with the `--client-attestation-type` or `--server-attestation-type` command line options.
 
-These aim to match the header formatting used by `cvm-reverse-proxy`.
+- `none` - No attestation provided
+- `dummy` - Forwards the attestation to a remote service (for testing purposes, not yet supported)
+- `gcp-tdx` - DCAP TDX on Google Cloud Platform
+- `azure-tdx` - TDX on Azure, with MAA (not yet supported)
+- `qemu-tdx` - TDX on Qemu (no cloud platform)
+- `dcap-tdx` - DCAP TDX (platform not specified)
 
 ## Protocol Specification
+
+A proxy-client client will immediately attempt to connect to the given proxy-server.
+
+Proxy-client to proxy-server connections use TLS 1.3.
+
+The protocol name `flashbots-ratls/1` must be given in the TLS configuration for ALPN protocol negotiation during the TLS handshake. Future versions of this protocol will use incrementing version numbers, eg: `flashbots-ratls/2`.
+
+Immediately after the TLS handshake, an attestation exchange is made. The server first provides an attestation message (even if it has the `none` attestation type). The client verifies, if verification is successful it also provides an attestation message and otherwise closes the connection. If the server cannot verify the client's attestation, it closes the connection.
+
+Attestation messages are formatted as follows:
+- A 4 byte length prefix - a big endian encoded unsigned 32 bit integer
+Simple Concatenated Aggregate Little-Endian
+Following a successful attestation exchange, the client can make HTTP requests using HTTP2, and the server will forward them to the target service.
+
+As described above, the server will inject measurement data into the request headers before forwarding them to the target service, and the client will inject measurement data into the response headers before forwarding them to the source client.
