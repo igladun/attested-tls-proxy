@@ -145,9 +145,9 @@ pub struct AttestationVerifier {
     ///
     /// If this is empty, anything will be accepted - but measurements are always injected into HTTP
     /// headers, so that they can be verified upstream
-    accepted_measurements: Vec<MeasurementRecord>,
+    pub accepted_measurements: Vec<MeasurementRecord>,
     /// A PCCS service to use - defaults to Intel PCS
-    pccs_url: Option<String>,
+    pub pccs_url: Option<String>,
 }
 
 impl AttestationVerifier {
