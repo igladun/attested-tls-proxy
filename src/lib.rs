@@ -329,6 +329,7 @@ fn full<T: Into<Bytes>>(chunk: T) -> BoxBody<Bytes, hyper::Error> {
 }
 
 /// A proxy client which forwards http traffic to a proxy-server
+#[derive(Debug)]
 pub struct ProxyClient {
     /// The underlying TCP listener
     listener: TcpListener,
@@ -817,6 +818,10 @@ where
 
 #[cfg(test)]
 mod tests {
+    use crate::attestation::measurements::{
+        CvmImageMeasurements, MeasurementRecord, PlatformMeasurements,
+    };
+
     use super::*;
     use test_helpers::{
         default_measurements, example_http_service, example_service, generate_certificate_chain,
@@ -1114,5 +1119,110 @@ mod tests {
         .unwrap();
 
         assert_eq!(retrieved_chain, cert_chain);
+    }
+
+    // Negative test - server does not provide attestation but client requires it
+    // Server has no attestaion, client has no attestation and no client auth
+    #[tokio::test]
+    async fn fails_on_no_attestation_when_expected() {
+        let target_addr = example_http_service().await;
+
+        let (cert_chain, private_key) = generate_certificate_chain("127.0.0.1".parse().unwrap());
+        let (server_config, client_config) = generate_tls_config(cert_chain.clone(), private_key);
+
+        let proxy_server = ProxyServer::new_with_tls_config(
+            cert_chain,
+            server_config,
+            "127.0.0.1:0",
+            target_addr,
+            Arc::new(NoQuoteGenerator),
+            AttestationVerifier::do_not_verify(),
+        )
+        .await
+        .unwrap();
+
+        let proxy_addr = proxy_server.local_addr().unwrap();
+
+        tokio::spawn(async move {
+            proxy_server.accept().await.unwrap();
+        });
+
+        let proxy_client_result = ProxyClient::new_with_tls_config(
+            client_config,
+            "127.0.0.1:0".to_string(),
+            proxy_addr.to_string(),
+            Arc::new(NoQuoteGenerator),
+            AttestationVerifier::mock(),
+            None,
+        )
+        .await;
+
+        assert!(matches!(
+            proxy_client_result.unwrap_err(),
+            ProxyError::Attestation(AttestationError::AttestationTypeNotAccepted)
+        ));
+    }
+
+    // Negative test - server does not provide attestation but client requires it
+    // Server has no attestaion, client has no attestation and no client auth
+    #[tokio::test]
+    async fn fails_on_bad_measurements() {
+        let target_addr = example_http_service().await;
+
+        let (cert_chain, private_key) = generate_certificate_chain("127.0.0.1".parse().unwrap());
+        let (server_config, client_config) = generate_tls_config(cert_chain.clone(), private_key);
+
+        let proxy_server = ProxyServer::new_with_tls_config(
+            cert_chain,
+            server_config,
+            "127.0.0.1:0",
+            target_addr,
+            Arc::new(DcapTdxQuoteGenerator {
+                attestation_type: AttestationType::DcapTdx,
+            }),
+            AttestationVerifier::do_not_verify(),
+        )
+        .await
+        .unwrap();
+
+        let proxy_addr = proxy_server.local_addr().unwrap();
+
+        tokio::spawn(async move {
+            proxy_server.accept().await.unwrap();
+        });
+
+        let attestation_verifier = AttestationVerifier {
+            accepted_measurements: vec![MeasurementRecord {
+                attestation_type: AttestationType::DcapTdx,
+                measurement_id: "test".to_string(),
+                measurements: Measurements {
+                    platform: PlatformMeasurements {
+                        mrtd: [0; 48],
+                        rtmr0: [0; 48],
+                    },
+                    cvm_image: CvmImageMeasurements {
+                        rtmr1: [1; 48], // This differs from the mock measurements given
+                        rtmr2: [0; 48],
+                        rtmr3: [0; 48],
+                    },
+                },
+            }],
+            pccs_url: None,
+        };
+
+        let proxy_client_result = ProxyClient::new_with_tls_config(
+            client_config,
+            "127.0.0.1:0".to_string(),
+            proxy_addr.to_string(),
+            Arc::new(NoQuoteGenerator),
+            attestation_verifier,
+            None,
+        )
+        .await;
+
+        assert!(matches!(
+            proxy_client_result.unwrap_err(),
+            ProxyError::Attestation(AttestationError::MeasurementsNotAccepted)
+        ));
     }
 }
