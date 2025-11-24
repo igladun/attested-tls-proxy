@@ -1,15 +1,19 @@
 pub mod azure;
-pub mod dcap;
 pub mod measurements;
 
-use measurements::Measurements;
+use measurements::{CvmImageMeasurements, MeasurementRecord, Measurements, PlatformMeasurements};
+use parity_scale_codec::{Decode, Encode};
+use serde::{Deserialize, Serialize};
 use std::{
     fmt::{self, Display, Formatter},
     time::SystemTimeError,
 };
 
 use configfs_tsm::QuoteGenerationError;
-use dcap_qvl::quote::Report;
+use dcap_qvl::{
+    collateral::get_collateral_for_fmspc,
+    quote::{Quote, Report},
+};
 use sha2::{Digest, Sha256};
 use tdx_quote::QuoteParseError;
 use thiserror::Error;
@@ -19,13 +23,34 @@ use x509_parser::prelude::*;
 /// For fetching collateral directly from intel, if no PCCS is specified
 const PCS_URL: &str = "https://api.trustedservices.intel.com";
 
+/// This is the type sent over the channel to provide an attestation
+#[derive(Debug, Serialize, Deserialize, Encode, Decode)]
+pub struct AttesationPayload {
+    /// What CVM platform is used (including none)
+    pub attestation_type: AttestationType,
+    /// The attestation evidence as bytes - in the case of DCAP this is a quote
+    pub attestation: Vec<u8>,
+}
+
+impl AttesationPayload {
+    /// Create an empty attestation payload for the case that we are running in a non-confidential
+    /// environment
+    pub fn without_attestation() -> Self {
+        Self {
+            attestation_type: AttestationType::None,
+            attestation: Vec::new(),
+        }
+    }
+}
+
 /// Type of attestaion used
 /// Only supported (or soon-to-be supported) types are given
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum AttestationType {
     /// No attestion
     None,
-    /// Mock attestion
+    /// Forwards the attestaion to a remote service (for testing purposes)
     Dummy,
     /// TDX on Google Cloud Platform
     GcpTdx,
@@ -33,6 +58,8 @@ pub enum AttestationType {
     AzureTdx,
     /// TDX on Qemu (no cloud platform)
     QemuTdx,
+    /// DCAP TDX
+    DcapTdx,
 }
 
 impl AttestationType {
@@ -44,7 +71,25 @@ impl AttestationType {
             AttestationType::AzureTdx => "azure-tdx",
             AttestationType::QemuTdx => "qemu-tdx",
             AttestationType::GcpTdx => "gcp-tdx",
+            AttestationType::DcapTdx => "dcap-tdx",
         }
+    }
+}
+
+/// SCALE encode (used over the wire)
+impl Encode for AttestationType {
+    fn encode(&self) -> Vec<u8> {
+        self.as_str().encode()
+    }
+}
+
+/// SCALE decode
+impl Decode for AttestationType {
+    fn decode<I: parity_scale_codec::Input>(
+        input: &mut I,
+    ) -> Result<Self, parity_scale_codec::Error> {
+        let s: String = String::decode(input)?;
+        serde_json::from_str(&format!("\"{s}\"")).map_err(|_| "Failed to decode enum".into())
     }
 }
 
@@ -54,31 +99,203 @@ impl Display for AttestationType {
     }
 }
 
-/// Defines how to generate an attestation
-pub trait QuoteGenerator: Clone + Send + 'static {
-    /// Type of attestation used
-    fn attestation_type(&self) -> AttestationType;
-
-    /// Generate an attestation
-    fn create_attestation(
-        &self,
-        cert_chain: &[CertificateDer<'_>],
-        exporter: [u8; 32],
-    ) -> impl Future<Output = Result<Vec<u8>, AttestationError>> + Send;
+#[derive(Clone)]
+pub struct AttestationGenerator {
+    pub attestation_type: AttestationType,
 }
 
-/// Defines how to verify a quote
-pub trait QuoteVerifier: Clone + Send + 'static {
-    /// Type of attestation used
-    fn attestation_type(&self) -> AttestationType;
-
-    /// Verify the given attestation payload
-    fn verify_attestation(
+impl AttestationGenerator {
+    pub async fn generate_attestation(
         &self,
-        input: Vec<u8>,
         cert_chain: &[CertificateDer<'_>],
         exporter: [u8; 32],
-    ) -> impl Future<Output = Result<Option<Measurements>, AttestationError>> + Send;
+    ) -> Result<AttesationPayload, AttestationError> {
+        Ok(AttesationPayload {
+            attestation_type: self.attestation_type,
+            attestation: self
+                .generate_attestation_bytes(cert_chain, exporter)
+                .await?,
+        })
+    }
+
+    async fn generate_attestation_bytes(
+        &self,
+        cert_chain: &[CertificateDer<'_>],
+        exporter: [u8; 32],
+    ) -> Result<Vec<u8>, AttestationError> {
+        match self.attestation_type {
+            AttestationType::None => Ok(Vec::new()),
+            AttestationType::AzureTdx => {
+                azure::create_azure_attestation(cert_chain, exporter).await
+            }
+            _ => create_dcap_attestation(cert_chain, exporter).await,
+        }
+    }
+}
+
+/// Allows remote attestations to be verified
+#[derive(Clone, Debug)]
+pub struct AttestationVerifier {
+    /// The measurement values we accept
+    ///
+    /// If this is empty, anything will be accepted - but measurements are always injected into HTTP
+    /// headers, so that they can be verified upstream
+    pub accepted_measurements: Vec<MeasurementRecord>,
+    /// A PCCS service to use - defaults to Intel PCS
+    pub pccs_url: Option<String>,
+}
+
+impl AttestationVerifier {
+    /// Create an [AttestationVerifier] which will allow no remote attestation
+    pub fn do_not_verify() -> Self {
+        Self {
+            accepted_measurements: Vec::new(),
+            pccs_url: None,
+        }
+    }
+
+    /// Expect mock measurements used in tests
+    #[cfg(test)]
+    pub fn mock() -> Self {
+        Self {
+            accepted_measurements: vec![MeasurementRecord {
+                attestation_type: AttestationType::DcapTdx,
+                measurement_id: "test".to_string(),
+                measurements: Measurements {
+                    platform: PlatformMeasurements {
+                        mrtd: [0; 48],
+                        rtmr0: [0; 48],
+                    },
+                    cvm_image: CvmImageMeasurements {
+                        rtmr1: [0; 48],
+                        rtmr2: [0; 48],
+                        rtmr3: [0; 48],
+                    },
+                },
+            }],
+            pccs_url: None,
+        }
+    }
+
+    /// Verify an attestation, and ensure the measurements match one of our accepted measurements
+    pub async fn verify_attestation(
+        &self,
+        attestation_payload: AttesationPayload,
+        cert_chain: &[CertificateDer<'_>],
+        exporter: [u8; 32],
+    ) -> Result<Option<Measurements>, AttestationError> {
+        let attestation_type = attestation_payload.attestation_type;
+
+        let measurements = match attestation_type {
+            AttestationType::DcapTdx => {
+                verify_dcap_attestation(
+                    attestation_payload.attestation,
+                    cert_chain,
+                    exporter,
+                    self.pccs_url.clone(),
+                )
+                .await?
+            }
+            AttestationType::None => {
+                if self.has_remote_attestion() {
+                    return Err(AttestationError::AttestationTypeNotAccepted);
+                }
+                if attestation_payload.attestation.is_empty() {
+                    return Ok(None);
+                } else {
+                    return Err(AttestationError::AttestationGivenWhenNoneExpected);
+                }
+            }
+            AttestationType::AzureTdx => {
+                azure::verify_azure_attestation(
+                    attestation_payload.attestation,
+                    cert_chain,
+                    exporter,
+                )
+                .await?
+            }
+            _ => {
+                return Err(AttestationError::AttestationTypeNotSupported);
+            }
+        };
+
+        // look through all our accepted measurements
+        self.accepted_measurements
+            .iter()
+            .find(|a| a.attestation_type == attestation_type && a.measurements == measurements)
+            .ok_or(AttestationError::MeasurementsNotAccepted)?;
+
+        Ok(Some(measurements))
+    }
+
+    /// Whether we allow no remote attestation
+    pub fn has_remote_attestion(&self) -> bool {
+        !self.accepted_measurements.is_empty()
+    }
+}
+
+/// Quote generation using configfs_tsm
+async fn create_dcap_attestation(
+    cert_chain: &[CertificateDer<'_>],
+    exporter: [u8; 32],
+) -> Result<Vec<u8>, AttestationError> {
+    let quote_input = compute_report_input(cert_chain, exporter)?;
+
+    Ok(generate_quote(quote_input)?)
+}
+
+/// Verify DCAP TDX quotes, allowing them if they have one of a given set of platform-specific and
+/// OS image specific measurements
+async fn verify_dcap_attestation(
+    input: Vec<u8>,
+    cert_chain: &[CertificateDer<'_>],
+    exporter: [u8; 32],
+    pccs_url: Option<String>,
+) -> Result<Measurements, AttestationError> {
+    let quote_input = compute_report_input(cert_chain, exporter)?;
+    let (platform_measurements, image_measurements) = if cfg!(not(test)) {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_secs();
+        let quote = Quote::parse(&input)?;
+
+        let ca = quote.ca()?;
+        let fmspc = hex::encode_upper(quote.fmspc()?);
+        let collateral = get_collateral_for_fmspc(
+            &pccs_url.clone().unwrap_or(PCS_URL.to_string()),
+            fmspc,
+            ca,
+            false, // Indicates not SGX
+        )
+        .await?;
+
+        let _verified_report = dcap_qvl::verify::verify(&input, &collateral, now)?;
+
+        let measurements = (
+            PlatformMeasurements::from_dcap_qvl_quote(&quote)?,
+            CvmImageMeasurements::from_dcap_qvl_quote(&quote)?,
+        );
+        if get_quote_input_data(quote.report) != quote_input {
+            return Err(AttestationError::InputMismatch);
+        }
+        measurements
+    } else {
+        // In tests we use mock quotes which will fail to verify
+        let quote = tdx_quote::Quote::from_bytes(&input)?;
+        if quote.report_input_data() != quote_input {
+            return Err(AttestationError::InputMismatch);
+        }
+
+        (
+            PlatformMeasurements::from_tdx_quote(&quote),
+            CvmImageMeasurements::from_tdx_quote(&quote),
+        )
+    };
+
+    Ok(Measurements {
+        platform: platform_measurements,
+        cvm_image: image_measurements,
+    })
 }
 
 /// Given a [Report] get the input data regardless of report type
@@ -101,51 +318,6 @@ pub fn compute_report_input(
     quote_input[..32].copy_from_slice(&pki_hash);
     quote_input[32..].copy_from_slice(&exporter);
     Ok(quote_input)
-}
-
-/// For no CVM platform (eg: for one-sided remote-attested TLS)
-#[derive(Clone)]
-pub struct NoQuoteGenerator;
-
-impl QuoteGenerator for NoQuoteGenerator {
-    /// Type of attestation used
-    fn attestation_type(&self) -> AttestationType {
-        AttestationType::None
-    }
-
-    /// Create an empty attestation
-    async fn create_attestation(
-        &self,
-        _cert_chain: &[CertificateDer<'_>],
-        _exporter: [u8; 32],
-    ) -> Result<Vec<u8>, AttestationError> {
-        Ok(Vec::new())
-    }
-}
-
-/// For no CVM platform (eg: for one-sided remote-attested TLS)
-#[derive(Clone)]
-pub struct NoQuoteVerifier;
-
-impl QuoteVerifier for NoQuoteVerifier {
-    /// Type of attestation used
-    fn attestation_type(&self) -> AttestationType {
-        AttestationType::None
-    }
-
-    /// Ensure that an empty attestation is given
-    async fn verify_attestation(
-        &self,
-        input: Vec<u8>,
-        _cert_chain: &[CertificateDer<'_>],
-        _exporter: [u8; 32],
-    ) -> Result<Option<Measurements>, AttestationError> {
-        if input.is_empty() {
-            Ok(None)
-        } else {
-            Err(AttestationError::AttestationGivenWhenNoneExpected)
-        }
-    }
 }
 
 /// Create a mock quote for testing on non-confidential hardware
@@ -209,4 +381,10 @@ pub enum AttestationError {
     DcapQvl(#[from] anyhow::Error),
     #[error("Quote parse: {0}")]
     QuoteParse(#[from] QuoteParseError),
+    #[error("Attestation type not supported")]
+    AttestationTypeNotSupported,
+    #[error("Attestation type not accepted")]
+    AttestationTypeNotAccepted,
+    #[error("Measurements not accepted")]
+    MeasurementsNotAccepted,
 }
