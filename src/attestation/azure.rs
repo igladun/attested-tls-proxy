@@ -1,3 +1,4 @@
+//! Microsoft Azure Attestation (MAA) evidence generation and verification
 use az_tdx_vtpm::{hcl, imds, report, vtpm};
 use tokio_rustls::rustls::pki_types::CertificateDer;
 // use openssl::pkey::{PKey, Public};
