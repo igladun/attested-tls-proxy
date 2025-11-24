@@ -1,8 +1,12 @@
 
 # `attested-tls-proxy`
 
-This is a work-in-progress crate designed to be an alternative to [`cvm-reverse-proxy`](https://github.com/flashbots/cvm-reverse-proxy).
+This is a reverse HTTP proxy allowing a normal HTTP client to communicate with a normal HTTP server over a remote-attested TLS channel, by tunneling requests through a proxy-client and proxy-server.
+
+This work-in-progress crate is designed to be an alternative to [`cvm-reverse-proxy`](https://github.com/flashbots/cvm-reverse-proxy).
 Unlike `cvm-reverse-proxy`, this uses post-handshake remote-attested TLS, meaning regular CA-signed TLS certificates can be used.
+
+The proxy-client, on starting, immediately connects to the proxy-server and an attestation-verification exchange is made. This attested-TLS channel is then re-used for all requests from that proxy-client instance. 
 
 It has three subcommands:
 - `attested-tls-proxy server` - run a proxy server, which accepts TLS connections from a proxy client, sends an attestation and then forwards traffic to a target CVM service.
@@ -11,7 +15,6 @@ It has three subcommands:
 
 ### How it works
 
-This is a reverse HTTP proxy allowing a normal HTTP client to communicate with a normal HTTP server over a remote-attested TLS channel, by tunneling requests through a proxy-client and proxy-server.
 
 This works as follows:
 1. The source HTTP client (eg: curl or a web browser) makes an HTTP request to a proxy-client instance running locally.
