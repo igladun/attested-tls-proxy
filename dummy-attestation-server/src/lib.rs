@@ -1,5 +1,6 @@
 use std::net::SocketAddr;
 
+use anyhow::anyhow;
 use attested_tls_proxy::attestation::{
     AttestationExchangeMessage, AttestationGenerator, AttestationVerifier,
 };
@@ -19,27 +20,25 @@ struct SharedState {
 pub async fn dummy_attestation_server(
     listener: TcpListener,
     attestation_generator: AttestationGenerator,
-) -> anyhow::Result<SocketAddr> {
-    let addr = listener.local_addr()?;
-
+) -> anyhow::Result<()> {
     let app = axum::Router::new()
         .route("/attest/{input_data}", axum::routing::get(get_attest))
         .with_state(SharedState {
             attestation_generator,
         });
 
-    tokio::spawn(async move {
-        axum::serve(listener, app).await.unwrap();
-    });
+    axum::serve(listener, app).await?;
 
-    Ok(addr)
+    Ok(())
 }
 
 async fn get_attest(
     State(shared_state): State<SharedState>,
     Path(input_data): Path<String>,
 ) -> Result<(StatusCode, Vec<u8>), ServerError> {
-    let input_data: [u8; 64] = hex::decode(input_data).unwrap().try_into().unwrap();
+    let input_data: [u8; 64] = hex::decode(input_data)?
+        .try_into()
+        .map_err(|_| anyhow!("Input data must be 64 bytes"))?;
 
     let attestation = shared_state
         .attestation_generator

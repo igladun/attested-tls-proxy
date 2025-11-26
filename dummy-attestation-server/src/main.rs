@@ -75,6 +75,8 @@ async fn main() -> anyhow::Result<()> {
             };
 
             let listener = TcpListener::bind(listen_addr).await?;
+
+            println!("Listening on {}", listener.local_addr()?);
             dummy_attestation_server(listener, attestation_generator).await?;
         }
         CliCommand::Client {
