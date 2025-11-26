@@ -17,7 +17,7 @@ pub fn get_session_context() -> Result<Context, tss_esapi::Error> {
 pub fn read_nv_index(ctx: &mut Context, index: u32) -> Result<Vec<u8>, tss_esapi::Error> {
     let handle = NvIndexHandle::from(index);
     let size = ctx
-        .nv_read_public(handle.into())?
+        .nv_read_public(handle)?
         .0
         .data_size()
         .try_into()

@@ -149,7 +149,7 @@ struct TpmAttest {
 
 fn read_ak_certificate_from_tpm() -> Result<Vec<u8>, tss_esapi::Error> {
     let mut context = nv_index::get_session_context()?;
-    Ok(nv_index::read_nv_index(&mut context, TPM_AK_CERT_IDX)?)
+    nv_index::read_nv_index(&mut context, TPM_AK_CERT_IDX)
 }
 
 #[derive(Error, Debug)]
