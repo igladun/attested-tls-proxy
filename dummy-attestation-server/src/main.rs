@@ -1,7 +1,10 @@
-use attested_tls_proxy::attestation::AttestationType;
+use attested_tls_proxy::attestation::{
+    measurements::get_measurements_from_file, AttestationGenerator, AttestationType,
+    AttestationVerifier,
+};
 use clap::{Parser, Subcommand};
 use dummy_attestation_server::{dummy_attestation_client, dummy_attestation_server};
-use std::net::SocketAddr;
+use std::{net::SocketAddr, path::PathBuf};
 use tokio::net::TcpListener;
 use tracing::level_filters::LevelFilter;
 
@@ -30,6 +33,9 @@ enum CliCommand {
     Client {
         /// Socket address of a dummy attestation server
         server_addr: SocketAddr,
+        /// Optional path to file containing JSON measurements to be enforced on the server
+        #[arg(long, env = "SERVER_MEASUREMENTS")]
+        server_measurements: Option<PathBuf>,
     },
 }
 
@@ -64,12 +70,30 @@ async fn main() -> anyhow::Result<()> {
                 serde_json::Value::String(server_attestation_type.unwrap_or("none".to_string())),
             )?;
 
-            let attestation_generator = server_attestation_type.get_quote_generator()?;
+            let attestation_generator = AttestationGenerator {
+                attestation_type: server_attestation_type,
+            };
 
             let listener = TcpListener::bind(listen_addr).await?;
             dummy_attestation_server(listener, attestation_generator).await?;
         }
-        CliCommand::Client { server_addr } => dummy_attestation_client(server_addr).await?,
+        CliCommand::Client {
+            server_addr,
+            server_measurements,
+        } => {
+            let attestation_verifier = match server_measurements {
+                Some(server_measurements) => AttestationVerifier {
+                    accepted_measurements: get_measurements_from_file(server_measurements).await?,
+                    pccs_url: None,
+                },
+                None => AttestationVerifier::do_not_verify(),
+            };
+
+            let attestation_message =
+                dummy_attestation_client(server_addr, attestation_verifier).await?;
+
+            println!("{attestation_message:?}")
+        }
     }
 
     Ok(())

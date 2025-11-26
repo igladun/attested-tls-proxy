@@ -831,17 +831,13 @@ dependencies = [
  "configfs-tsm",
  "hex",
  "parity-scale-codec",
- "rcgen",
  "reqwest",
- "rustls-pemfile",
  "serde",
  "serde_json",
  "thiserror 2.0.17",
  "tokio",
- "tokio-rustls",
  "tracing",
  "tracing-subscriber",
- "webpki-roots",
 ]
 
 [[package]]

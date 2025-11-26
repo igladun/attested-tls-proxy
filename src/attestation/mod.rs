@@ -15,7 +15,7 @@ use tdx_quote::QuoteParseError;
 use thiserror::Error;
 
 /// This is the type sent over the channel to provide an attestation
-#[derive(Debug, Serialize, Deserialize, Encode, Decode)]
+#[derive(Clone, Debug, Serialize, Deserialize, Encode, Decode)]
 pub struct AttestationExchangeMessage {
     /// What CVM platform is used (including none)
     pub attestation_type: AttestationType,
