@@ -4,7 +4,6 @@ use attested_tls_proxy::attestation::{
 };
 use clap::{Parser, Subcommand};
 use dummy_attestation_server::{dummy_attestation_client, dummy_attestation_server};
-use parity_scale_codec::Encode;
 use std::{net::SocketAddr, path::PathBuf};
 use tokio::net::TcpListener;
 use tracing::level_filters::LevelFilter;

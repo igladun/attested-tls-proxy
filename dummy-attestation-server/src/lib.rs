@@ -111,9 +111,12 @@ mod tests {
 
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let server_addr = listener.local_addr().unwrap();
-        dummy_attestation_server(listener, attestation_generator)
-            .await
-            .unwrap();
+
+        tokio::spawn(async move {
+            dummy_attestation_server(listener, attestation_generator)
+                .await
+                .unwrap();
+        });
         dummy_attestation_client(server_addr, AttestationVerifier::do_not_verify())
             .await
             .unwrap();
