@@ -160,8 +160,6 @@ pub enum MeasurementFormatError {
 pub struct MeasurementRecord {
     /// An identifier, for example the name and version of the corresponding OS image
     pub measurement_id: String,
-    /// The associated attestation platform
-    pub attestation_type: AttestationType,
     /// The expected measurement register values
     pub measurements: Measurements,
 }
