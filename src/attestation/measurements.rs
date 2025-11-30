@@ -229,6 +229,7 @@ impl MeasurementPolicy {
         }
     }
 
+    /// Given an attestation type and set of measurements, check whether they are acceptable
     pub fn check_measurement(
         &self,
         attestation_type: AttestationType,

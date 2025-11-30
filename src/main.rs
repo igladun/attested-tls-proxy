@@ -17,6 +17,7 @@ struct Cli {
     /// Optional path to file containing JSON measurements to be enforced on the remote party
     #[arg(
         long,
+        global = true,
         required_unless_present = "allowed_remote_attestation_type",
         conflicts_with = "allowed_remote_attestation_type",
         env = "MEASUREMENTS_FILE"
@@ -25,6 +26,7 @@ struct Cli {
     /// If no measurements file is specified, a single attestion type to allow
     #[arg(
         long,
+        global = true,
         required_unless_present = "measurements_file",
         conflicts_with = "measurements_file"
     )]
@@ -52,7 +54,7 @@ enum CliCommand {
         listen_addr: SocketAddr,
         /// The hostname:port or ip:port of the proxy server (port defaults to 443)
         target_addr: String,
-        /// Type of attestaion to present (dafaults to none)
+        /// Type of attestation to present (dafaults to none)
         /// If other than None, a TLS key and certicate must also be given
         #[arg(long, env = "CLIENT_ATTESTATION_TYPE")]
         client_attestation_type: Option<String>,
@@ -77,7 +79,7 @@ enum CliCommand {
         listen_addr: SocketAddr,
         /// Socket address of the target service to forward traffic to
         target_addr: SocketAddr,
-        /// Type of attestaion to present (dafaults to none)
+        /// Type of attestation to present (dafaults to none)
         /// If other than None, a TLS key and certicate must also be given
         #[arg(long, env = "SERVER_ATTESTATION_TYPE")]
         server_attestation_type: Option<String>,
