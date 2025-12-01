@@ -32,7 +32,7 @@ pub async fn create_azure_attestation(input_data: [u8; 64]) -> Result<Vec<u8>, M
         //     pem_rfc7468::LineEnding::default(),
         //     &ak_certificate_der,
         // )?,
-        quote: vtpm::get_quote(&input_data)?,
+        quote: vtpm::get_quote(&input_data[..32])?,
         event_log: Vec::new(),
         instance_info: None,
     };
@@ -78,7 +78,7 @@ pub async fn verify_azure_attestation(
     .await
     .unwrap();
 
-    let _verified_report = dcap_qvl::verify::verify(&input, &collateral, now).unwrap();
+    let _verified_report = dcap_qvl::verify::verify(&tdx_quote_bytes, &collateral, now).unwrap();
 
     // Check that hcl_report_bytes (hashed?) matches TDX quote report data
     // if get_quote_input_data(quote.report) != quote_input {
@@ -98,7 +98,7 @@ pub async fn verify_azure_attestation(
     let vtpm_quote = attestation_document.tpm_attestation.quote;
     let hcl_ak_pub_der = hcl_ak_pub.key.try_to_der().unwrap();
     let pub_key = PKey::public_key_from_der(&hcl_ak_pub_der).unwrap();
-    vtpm_quote.verify(&pub_key, &expected_input_data)?;
+    vtpm_quote.verify(&pub_key, &expected_input_data[..32])?;
     let _pcrs = vtpm_quote.pcrs_sha256();
 
     // TODO parse AK certificate
@@ -194,5 +194,15 @@ mod tests {
                 .len(),
             64
         );
+    }
+
+    #[tokio::test]
+    async fn test_verify() {
+        // Will pass if now = 1764621240 seconds
+        let attestation_bytes: &'static [u8] =
+            include_bytes!("../../test-assets/azure-tdx-1764620247665812984");
+        verify_azure_attestation(attestation_bytes.to_vec(), [0; 64], None)
+            .await
+            .unwrap();
     }
 }
