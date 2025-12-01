@@ -1,9 +1,8 @@
+pub use attested_tls_proxy::attestation::AttestationGenerator;
 use std::net::SocketAddr;
 
 use anyhow::anyhow;
-use attested_tls_proxy::attestation::{
-    AttestationExchangeMessage, AttestationGenerator, AttestationVerifier,
-};
+use attested_tls_proxy::attestation::{AttestationExchangeMessage, AttestationVerifier};
 use axum::{
     extract::{Path, State},
     http::StatusCode,

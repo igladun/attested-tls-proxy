@@ -260,7 +260,13 @@ impl AttestationVerifier {
                 .await?
             }
             AttestationType::Dummy => {
-                return Err(AttestationError::AttestationTypeNotSupported);
+                // Dummy assumes dummy DCAP
+                dcap::verify_dcap_attestation(
+                    attestation_exchange_message.attestation,
+                    expected_input_data,
+                    self.pccs_url.clone(),
+                )
+                .await?
             }
             _ => {
                 dcap::verify_dcap_attestation(
