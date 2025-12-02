@@ -6,6 +6,7 @@ use base64::{engine::general_purpose::URL_SAFE as BASE64_URL_SAFE, Engine as _};
 use openssl::pkey::PKey;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use x509_parser::prelude::*;
 
 use crate::attestation::{
     self,
@@ -111,9 +112,21 @@ async fn verify_azure_attestation_with_given_timestamp(
     vtpm_quote.verify(&pub_key, &expected_input_data[..32])?;
     let _pcrs = vtpm_quote.pcrs_sha256();
 
-    // TODO parse AK certificate
-    // Check that AK public key matches that from TPM quote
-    // Verify AK certificate against microsoft root cert
+    // Parse AK certificate
+    let (_type_label, ak_certificate_der) = pem_rfc7468::decode_vec(
+        attestation_document
+            .tpm_attestation
+            .ak_certificate_pem
+            .as_bytes(),
+    )
+    .unwrap();
+    let (_, ak_certificate) = X509Certificate::from_der(&ak_certificate_der).unwrap();
+    if !cert_pubkey_matches(&ak_certificate, &pub_key) {
+        panic!("does not match");
+    }
+    // TODO Check that AK public key matches that from TPM quote
+
+    // TODO Verify AK certificate against microsoft root cert
 
     Ok(Measurements {
         platform: PlatformMeasurements::from_dcap_qvl_quote(&quote).unwrap(),
@@ -150,6 +163,28 @@ struct TpmAttest {
 fn read_ak_certificate_from_tpm() -> Result<Vec<u8>, tss_esapi::Error> {
     let mut context = nv_index::get_session_context()?;
     nv_index::read_nv_index(&mut context, TPM_AK_CERT_IDX)
+}
+
+fn cert_pubkey_matches(cert: &X509Certificate<'_>, key: &PKey<openssl::pkey::Public>) -> bool {
+    // Extract the SubjectPublicKeyInfo from x509_parser
+    let spki_der = cert
+        .tbs_certificate
+        .subject_pki
+        .subject_public_key
+        .data
+        .clone();
+
+    // Parse it into an OpenSSL PKey
+    let cert_pkey = match PKey::public_key_from_der(&spki_der) {
+        Ok(k) => k,
+        Err(_) => return false,
+    };
+
+    // Compare canonicalized DER encodings of both
+    match (cert_pkey.public_key_to_der(), key.public_key_to_der()) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => panic!("encoding failed"),
+    }
 }
 
 #[derive(Error, Debug)]
