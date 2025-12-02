@@ -50,14 +50,25 @@ pub async fn verify_azure_attestation(
     expected_input_data: [u8; 64],
     pccs_url: Option<String>,
 ) -> Result<super::measurements::Measurements, MaaError> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("Time went backwards")
+        .as_secs();
+
+    verify_azure_attestation_with_given_timestamp(input, expected_input_data, pccs_url, now).await
+}
+
+/// Do the verification, passing in the current time
+/// This allows us to test this function without time checks going out of date
+async fn verify_azure_attestation_with_given_timestamp(
+    input: Vec<u8>,
+    expected_input_data: [u8; 64],
+    pccs_url: Option<String>,
+    now: u64,
+) -> Result<super::measurements::Measurements, MaaError> {
     let attestation_document: AttestationDocument = serde_json::from_slice(&input)?;
 
     // Verify TDX quote (same as with DCAP) - TODO deduplicate this code
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
-
     let tdx_quote_bytes = BASE64_URL_SAFE
         .decode(attestation_document.tdx_quote_base64)
         .unwrap();
@@ -197,11 +208,16 @@ mod tests {
 
     #[tokio::test]
     async fn test_verify() {
-        // Will pass if now = 1764621240 seconds
+        let now = 1764621240;
         let attestation_bytes: &'static [u8] =
             include_bytes!("../../test-assets/azure-tdx-1764662251380464271");
-        verify_azure_attestation(attestation_bytes.to_vec(), [0; 64], None)
-            .await
-            .unwrap();
+        verify_azure_attestation_with_given_timestamp(
+            attestation_bytes.to_vec(),
+            [0; 64],
+            None,
+            now,
+        )
+        .await
+        .unwrap();
     }
 }
