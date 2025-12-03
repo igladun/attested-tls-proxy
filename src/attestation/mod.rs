@@ -1,7 +1,7 @@
+#[cfg(feature = "azure")]
 pub mod azure;
 pub mod dcap;
 pub mod measurements;
-pub mod nv_index;
 
 use measurements::Measurements;
 use parity_scale_codec::{Decode, Encode};
@@ -166,7 +166,16 @@ impl AttestationGenerator {
     ) -> Result<Vec<u8>, AttestationError> {
         match self.attestation_type {
             AttestationType::None => Ok(Vec::new()),
-            AttestationType::AzureTdx => Ok(azure::create_azure_attestation(input_data).await?),
+            AttestationType::AzureTdx => {
+                #[cfg(feature = "azure")]
+                {
+                    Ok(azure::create_azure_attestation(input_data).await?)
+                }
+                #[cfg(not(feature = "azure"))]
+                {
+                    Err(AttestationError::AttestationTypeNotSupported)
+                }
+            }
             AttestationType::Dummy => self.generate_dummy_attestation(input_data).await,
             _ => dcap::create_dcap_attestation(input_data).await,
         }
@@ -252,12 +261,19 @@ impl AttestationVerifier {
                 }
             }
             AttestationType::AzureTdx => {
-                azure::verify_azure_attestation(
-                    attestation_exchange_message.attestation,
-                    expected_input_data,
-                    self.pccs_url.clone(),
-                )
-                .await?
+                #[cfg(feature = "azure")]
+                {
+                    azure::verify_azure_attestation(
+                        attestation_exchange_message.attestation,
+                        expected_input_data,
+                        self.pccs_url.clone(),
+                    )
+                    .await?
+                }
+                #[cfg(not(feature = "azure"))]
+                {
+                    return Err(AttestationError::AttestationTypeNotSupported);
+                }
             }
             AttestationType::Dummy => {
                 // Dummy assumes dummy DCAP
@@ -340,6 +356,7 @@ pub enum AttestationError {
     AttestationTypeNotAccepted,
     #[error("Measurements not accepted")]
     MeasurementsNotAccepted,
+    #[cfg(feature = "azure")]
     #[error("MAA: {0}")]
     Maa(#[from] azure::MaaError),
     #[error("Dummy attestation type requires dummy service URL")]

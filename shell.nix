@@ -7,5 +7,6 @@ pkgs.mkShell {
 
   buildInputs = with pkgs;[
     tpm2-tss
+    openssl
   ];
 }

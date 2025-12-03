@@ -1,5 +1,6 @@
 //! Microsoft Azure Attestation (MAA) evidence generation and verification
 mod ak_certificate;
+mod nv_index;
 use ak_certificate::{read_ak_certificate_from_tpm, verify_ak_cert_with_azure_roots};
 use std::string::FromUtf8Error;
 
