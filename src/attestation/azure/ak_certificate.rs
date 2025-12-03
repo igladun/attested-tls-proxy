@@ -1,5 +1,6 @@
 //! Generation and verification of AK certificates from the vTPM
 use crate::attestation::{azure::MaaError, nv_index};
+use once_cell::sync::Lazy;
 use std::time::Duration;
 use tokio_rustls::rustls::pki_types::{CertificateDer, TrustAnchor, UnixTime};
 use webpki::EndEntityCert;
@@ -85,7 +86,7 @@ bd+PA4RBToG9rXn6vNkUWdbLibU=
 // Source: https://learn.microsoft.com/en-us/azure/virtual-machines/trusted-launch-faq
 // Issuer: Azure Virtual TPM Root Certificate Authority 2023
 // Valid: 2025-04-24 to 2027-04-24
-const GLOBAL_VIRTUAL_TPMCA03: &str = "-----BEGIN CERTIFICATE-----
+const GLOBAL_VIRTUAL_TPMCA03_PEM: &str = "-----BEGIN CERTIFICATE-----
 MIIFnDCCA4SgAwIBAgITMwAAAAknQOWscnsOpgAAAAAACTANBgkqhkiG9w0BAQwF
 ADBpMQswCQYDVQQGEwJVUzEeMBwGA1UEChMVTWljcm9zb2Z0IENvcnBvcmF0aW9u
 MTowOAYDVQQDEzFBenVyZSBWaXJ0dWFsIFRQTSBSb290IENlcnRpZmljYXRlIEF1
@@ -118,20 +119,36 @@ zRNW32EFmcAUKZImIsE5dgB7y7eiijf33VWNfWmK05fxzQziWFWRYlET4SVc3jMn
 PBiY3N8BfK8EBOYbLvzo0qn2n3SAmPhYX3Ag6vbbIHd4Qc8DQKHRV0PB8D3jPGmD
 -----END CERTIFICATE-----";
 
+/// The intermediate chain for azure
+static GLOBAL_VIRTUAL_TPMCA03: Lazy<Vec<CertificateDer<'static>>> = Lazy::new(|| {
+    let (_type_label, cert_der) =
+        pem_rfc7468::decode_vec(GLOBAL_VIRTUAL_TPMCA03_PEM.as_bytes()).expect("Cannot decode PEM");
+    vec![CertificateDer::from(cert_der)]
+});
+
+/// The root anchors for azure
+static AZURE_ROOT_ANCHORS: Lazy<Vec<TrustAnchor<'static>>> = Lazy::new(|| {
+    vec![
+        // Microsoft RSA Devices Root CA 2021 (older VMs)
+        pem_to_trust_anchor(MICROSOFT_RSA_DEVICES_ROOT_2021),
+        // Azure Virtual TPM Root CA 2023 (TDX + newer trusted launch)
+        pem_to_trust_anchor(AZURE_VIRTUAL_TPM_ROOT_2023),
+    ]
+});
+
 /// Verify an AK certificate against azure root CA
 pub fn verify_ak_cert_with_azure_roots(ak_cert_der: &[u8], now_secs: u64) -> Result<(), MaaError> {
     let ak_cert_der: CertificateDer = ak_cert_der.into();
     let end_entity_cert = EndEntityCert::try_from(&ak_cert_der)?;
 
-    let roots = azure_root_anchors();
-    let intermediates = azure_intermediate_chain();
+    // let intermediates = azure_intermediate_chain();
 
     let now = UnixTime::since_unix_epoch(Duration::from_secs(now_secs));
 
     end_entity_cert.verify_for_usage(
         webpki::ALL_VERIFICATION_ALGS,
-        &roots,
-        &intermediates,
+        &AZURE_ROOT_ANCHORS,
+        &GLOBAL_VIRTUAL_TPMCA03,
         now,
         AnyEku,
         None,
@@ -155,23 +172,6 @@ fn pem_to_trust_anchor(pem: &str) -> TrustAnchor<'static> {
     let cert_der: &'static CertificateDer<'static> =
         Box::leak(Box::new(CertificateDer::from(leaked)));
     webpki::anchor_from_trusted_cert(cert_der).expect("Failed to create trust anchor")
-}
-
-/// Returns the root anchors for azure
-fn azure_root_anchors() -> Vec<TrustAnchor<'static>> {
-    vec![
-        // Microsoft RSA Devices Root CA 2021 (older VMs)
-        pem_to_trust_anchor(MICROSOFT_RSA_DEVICES_ROOT_2021),
-        // Azure Virtual TPM Root CA 2023 (TDX + newer trusted launch)
-        pem_to_trust_anchor(AZURE_VIRTUAL_TPM_ROOT_2023),
-    ]
-}
-
-/// Returns the intermediate chain for azure
-fn azure_intermediate_chain() -> Vec<CertificateDer<'static>> {
-    let (_type_label, cert_der) =
-        pem_rfc7468::decode_vec(GLOBAL_VIRTUAL_TPMCA03.as_bytes()).unwrap();
-    vec![CertificateDer::from(cert_der)]
 }
 
 /// Allows any EKU - we could change this to only accept 1.3.6.1.4.1.567.10.3.12 which is the EKU
