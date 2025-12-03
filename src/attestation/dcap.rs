@@ -90,7 +90,7 @@ fn generate_quote(input: [u8; 64]) -> Result<Vec<u8>, QuoteGenerationError> {
 }
 
 /// Given a [Report] get the input data regardless of report type
-fn get_quote_input_data(report: Report) -> [u8; 64] {
+pub fn get_quote_input_data(report: Report) -> [u8; 64] {
     match report {
         Report::TD10(r) => r.report_data,
         Report::TD15(r) => r.base.report_data,

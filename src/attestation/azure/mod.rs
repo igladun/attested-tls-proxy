@@ -1,4 +1,6 @@
 //! Microsoft Azure Attestation (MAA) evidence generation and verification
+mod ak_certificate;
+use ak_certificate::{read_ak_certificate_from_tpm, verify_ak_cert_with_azure_roots};
 use std::string::FromUtf8Error;
 
 use az_tdx_vtpm::{hcl, imds, report, vtpm};
@@ -11,11 +13,9 @@ use x509_parser::prelude::*;
 
 use crate::attestation::{
     self,
+    dcap::get_quote_input_data,
     measurements::{CvmImageMeasurements, Measurements, PlatformMeasurements},
-    nv_index,
 };
-
-const TPM_AK_CERT_IDX: u32 = 0x1C101D0;
 
 /// The attestation evidence payload that gets sent over the channel
 #[derive(Debug, Serialize, Deserialize)]
@@ -40,7 +40,7 @@ struct TpmAttest {
     /// `/sys/kernel/security/ima/ascii_runtime_measurements`,
     /// `/sys/kernel/security/tpm0/binary_bios_measurements`,
     event_log: Vec<u8>,
-    /// Optional platform / instance metadata used to bind or verify the AK
+    /// Optional platform / instance metadata used to bind or verify the AK [currently not used]
     instance_info: Option<Vec<u8>>,
 }
 
@@ -119,22 +119,25 @@ async fn verify_azure_attestation_with_given_timestamp(
 
     let _verified_report = dcap_qvl::verify::verify(&tdx_quote_bytes, &collateral, now).unwrap();
 
-    // Check that hcl_report_bytes (hashed?) matches TDX quote report data
-    // if get_quote_input_data(quote.report) != quote_input {
-    //     return Err(AttestationError::InputMismatch);
-    // }
-
     let hcl_report_bytes = BASE64_URL_SAFE
         .decode(attestation_document.hcl_report_base64)
         .unwrap();
 
     let hcl_report = hcl::HclReport::new(hcl_report_bytes)?;
     let var_data_hash = hcl_report.var_data_sha256();
+    println!("var data {}", hex::encode(var_data_hash));
+
+    // Check that HCL var data hash matches TDX quote report data
+    let mut expected_tdx_input_data = [0u8; 64];
+    expected_tdx_input_data[..32].copy_from_slice(&var_data_hash);
+    if get_quote_input_data(quote.report.clone()) != expected_tdx_input_data {
+        return Err(MaaError::TdxQuoteInputMismatch);
+    }
+
     let hcl_ak_pub = hcl_report.ak_pub()?;
 
-    let runtime_data_raw = hcl_report.var_data();
-
     // Check runtime data
+    let runtime_data_raw = hcl_report.var_data();
     let claims: HclRuntimeClaims = serde_json::from_slice(runtime_data_raw)?;
 
     let ak_jwk = claims
@@ -163,7 +166,10 @@ async fn verify_azure_attestation_with_given_timestamp(
     )
     .unwrap();
 
-    let (_, ak_certificate) = X509Certificate::from_der(&ak_certificate_der).unwrap();
+    let (remaining_bytes, ak_certificate) = X509Certificate::from_der(&ak_certificate_der).unwrap();
+
+    let leaf_len = ak_certificate_der.len() - remaining_bytes.len();
+    let ak_certificate_der_without_trailing_data = &ak_certificate_der[..leaf_len];
 
     // Check that AK public key matches that from TPM quote and HCL claims
     let ak_from_certificate = RsaPubKey::from_certificate(&ak_certificate).unwrap();
@@ -171,8 +177,8 @@ async fn verify_azure_attestation_with_given_timestamp(
     assert!(ak_from_claims == ak_from_hcl);
     assert!(ak_from_claims == ak_from_certificate);
 
-    // TODO Verify AK certificate against microsoft root cert
-    // TODO Do basic certificate checks (validity, time)
+    // Verify the AK certificate against microsoft root cert
+    verify_ak_cert_with_azure_roots(ak_certificate_der_without_trailing_data, now).unwrap();
 
     Ok(Measurements {
         platform: PlatformMeasurements::from_dcap_qvl_quote(&quote).unwrap(),
@@ -192,6 +198,7 @@ pub struct Jwk {
     // other fields ignored
 }
 
+/// The internal data structure for HCL runtime claims
 #[derive(Debug, serde::Deserialize)]
 struct HclRuntimeClaims {
     keys: Vec<Jwk>,
@@ -202,11 +209,8 @@ struct HclRuntimeClaims {
     #[serde(rename = "user-data")]
     user_data: Option<serde_json::Value>,
 }
-fn read_ak_certificate_from_tpm() -> Result<Vec<u8>, tss_esapi::Error> {
-    let mut context = nv_index::get_session_context()?;
-    nv_index::read_nv_index(&mut context, TPM_AK_CERT_IDX)
-}
 
+/// This is only used as a common type to compare public keys with different formats
 #[derive(Debug, PartialEq)]
 struct RsaPubKey {
     n: BigUint,
@@ -282,6 +286,8 @@ pub enum MaaError {
     TssEsapi(#[from] tss_esapi::Error),
     #[error("PEM encode: {0}")]
     Pem(#[from] pem_rfc7468::Error),
+    #[error("TDX quote input does not match hashed HCL var data")]
+    TdxQuoteInputMismatch,
 }
 
 #[cfg(test)]
@@ -291,7 +297,7 @@ mod tests {
     #[tokio::test]
     async fn test_decode_hcl() {
         // from cvm-reverse-proxy/internal/attestation/azure/tdx/testdata/hclreport.bin
-        let hcl_bytes: &'static [u8] = include_bytes!("../../test-assets/hclreport.bin");
+        let hcl_bytes: &'static [u8] = include_bytes!("../../../test-assets/hclreport.bin");
 
         let hcl_report = hcl::HclReport::new(hcl_bytes.to_vec()).unwrap();
         let hcl_var_data = hcl_report.var_data();
@@ -306,12 +312,14 @@ mod tests {
         );
     }
 
+    /// Verify a stored attestation from a test-deployment on azure
     #[tokio::test]
     async fn test_verify() {
         let attestation_bytes: &'static [u8] =
-            include_bytes!("../../test-assets/azure-tdx-1764662251380464271");
+            include_bytes!("../../../test-assets/azure-tdx-1764662251380464271");
 
-        // To avoid this test stopping working when the certificate is no longer valid
+        // To avoid this test stopping working when the certificate is no longer valid we pass in a
+        // timestamp
         let now = 1764621240;
 
         verify_azure_attestation_with_given_timestamp(
