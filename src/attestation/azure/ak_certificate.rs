@@ -141,8 +141,6 @@ pub fn verify_ak_cert_with_azure_roots(ak_cert_der: &[u8], now_secs: u64) -> Res
     let ak_cert_der: CertificateDer = ak_cert_der.into();
     let end_entity_cert = EndEntityCert::try_from(&ak_cert_der)?;
 
-    // let intermediates = azure_intermediate_chain();
-
     let now = UnixTime::since_unix_epoch(Duration::from_secs(now_secs));
 
     end_entity_cert.verify_for_usage(
