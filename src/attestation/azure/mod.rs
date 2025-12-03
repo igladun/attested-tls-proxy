@@ -44,6 +44,7 @@ struct TpmAttest {
     instance_info: Option<Vec<u8>>,
 }
 
+/// Generate a TDX attestation on Azure
 pub async fn create_azure_attestation(input_data: [u8; 64]) -> Result<Vec<u8>, MaaError> {
     let td_report = report::get_report()?;
 
@@ -74,6 +75,7 @@ pub async fn create_azure_attestation(input_data: [u8; 64]) -> Result<Vec<u8>, M
     Ok(serde_json::to_vec(&attestation_document)?)
 }
 
+/// Verify a TDX attestation from Azure
 pub async fn verify_azure_attestation(
     input: Vec<u8>,
     expected_input_data: [u8; 64],
@@ -130,23 +132,27 @@ async fn verify_azure_attestation_with_given_timestamp(
 
     let hcl_ak_pub = hcl_report.ak_pub()?;
 
-    // Check runtime data
-    let runtime_data_raw = hcl_report.var_data();
-    let claims: HclRuntimeClaims = serde_json::from_slice(runtime_data_raw)?;
+    // Get attestation key from runtime claims
+    let ak_from_claims = {
+        let runtime_data_raw = hcl_report.var_data();
+        let claims: HclRuntimeClaims = serde_json::from_slice(runtime_data_raw)?;
 
-    let ak_jwk = claims
-        .keys
-        .iter()
-        .find(|k| k.kid == "HCLAkPub")
-        .ok_or(MaaError::ClaimsMissingHCLAkPub)?;
+        let ak_jwk = claims
+            .keys
+            .iter()
+            .find(|k| k.kid == "HCLAkPub")
+            .ok_or(MaaError::ClaimsMissingHCLAkPub)?;
 
-    let ak_from_claims = RsaPubKey::from_jwk(ak_jwk)?;
+        RsaPubKey::from_jwk(ak_jwk)?
+    };
 
+    // Check that the TD report input data matches the HCL var data hash
     let td_report: az_tdx_vtpm::tdx::TdReport = hcl_report.try_into()?;
     if var_data_hash != td_report.report_mac.reportdata[..32] {
         return Err(MaaError::TdReportInputMismatch);
     }
 
+    // Verify the vTPM quote
     let vtpm_quote = attestation_document.tpm_attestation.quote;
     let hcl_ak_pub_der = hcl_ak_pub
         .key
@@ -154,6 +160,7 @@ async fn verify_azure_attestation_with_given_timestamp(
         .map_err(|_| MaaError::JwkConversion)?;
     let pub_key = PKey::public_key_from_der(&hcl_ak_pub_der)?;
     vtpm_quote.verify(&pub_key, &expected_input_data[..32])?;
+
     let _pcrs = vtpm_quote.pcrs_sha256();
 
     // Parse AK certificate
@@ -166,9 +173,6 @@ async fn verify_azure_attestation_with_given_timestamp(
 
     let (remaining_bytes, ak_certificate) = X509Certificate::from_der(&ak_certificate_der)?;
 
-    let leaf_len = ak_certificate_der.len() - remaining_bytes.len();
-    let ak_certificate_der_without_trailing_data = &ak_certificate_der[..leaf_len];
-
     // Check that AK public key matches that from TPM quote and HCL claims
     let ak_from_certificate = RsaPubKey::from_certificate(&ak_certificate)?;
     let ak_from_hcl = RsaPubKey::from_openssl_pubkey(&pub_key)?;
@@ -178,6 +182,10 @@ async fn verify_azure_attestation_with_given_timestamp(
     if ak_from_claims != ak_from_certificate {
         return Err(MaaError::AkFromClaimsNotEqualAkFromCertificate);
     }
+
+    // Strip trailing data from AK certificate
+    let leaf_len = ak_certificate_der.len() - remaining_bytes.len();
+    let ak_certificate_der_without_trailing_data = &ak_certificate_der[..leaf_len];
 
     // Verify the AK certificate against microsoft root cert
     verify_ak_cert_with_azure_roots(ak_certificate_der_without_trailing_data, now)?;
@@ -190,8 +198,9 @@ async fn verify_azure_attestation_with_given_timestamp(
     })
 }
 
+/// JSON Web Key used in [HclRuntimeClaims]
 #[derive(Debug, Deserialize)]
-pub struct Jwk {
+struct Jwk {
     #[allow(unused)]
     pub kty: String,
     pub kid: String,
