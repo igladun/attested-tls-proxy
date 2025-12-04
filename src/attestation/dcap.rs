@@ -16,7 +16,9 @@ pub const PCS_URL: &str = "https://api.trustedservices.intel.com";
 
 /// Quote generation using configfs_tsm
 pub async fn create_dcap_attestation(input_data: [u8; 64]) -> Result<Vec<u8>, AttestationError> {
-    Ok(generate_quote(input_data)?)
+    let quote = generate_quote(input_data)?;
+    tracing::info!("Generated TDX quote of {} bytes", quote.len());
+    Ok(quote)
 }
 
 /// Verify a DCAP TDX quote, and return the measurement values
@@ -30,6 +32,7 @@ pub async fn verify_dcap_attestation(
             .duration_since(std::time::UNIX_EPOCH)?
             .as_secs();
         let quote = Quote::parse(&input)?;
+        tracing::info!("Verifying DCAP attestation: {quote:?}");
 
         let ca = quote.ca()?;
         let fmspc = hex::encode_upper(quote.fmspc()?);
@@ -99,27 +102,13 @@ pub fn get_quote_input_data(report: Report) -> [u8; 64] {
     }
 }
 
-/// An error when generating or verifying an attestation
+/// An error when verifying a DCAP attestation
 #[derive(Error, Debug)]
 pub enum DcapVerificationError {
-    // #[error("Certificate chain is empty")]
-    // NoCertificate,
-    // #[error("X509 parse: {0}")]
-    // X509Parse(#[from] x509_parser::asn1_rs::Err<x509_parser::error::X509Error>),
-    // #[error("X509: {0}")]
-    // X509(#[from] x509_parser::error::X509Error),
     #[error("Quote input is not as expected")]
     InputMismatch,
-    // #[error("Configuration mismatch - expected no remote attestation")]
-    // AttestationGivenWhenNoneExpected,
-    // #[error("Configfs-tsm quote generation: {0}")]
-    // QuoteGeneration(#[from] configfs_tsm::QuoteGenerationError),
     #[error("SGX quote given when TDX quote expected")]
     SgxNotSupported,
-    // #[error("Platform measurements do not match any accepted values")]
-    // UnacceptablePlatformMeasurements,
-    // #[error("OS image measurements do not match any accepted values")]
-    // UnacceptableOsImageMeasurements,
     #[error("System Time: {0}")]
     SystemTime(#[from] std::time::SystemTimeError),
     #[error("DCAP quote verification: {0}")]

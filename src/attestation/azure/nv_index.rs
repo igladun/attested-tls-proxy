@@ -14,6 +14,7 @@ pub fn get_session_context() -> Result<Context, tss_esapi::Error> {
 }
 
 pub fn read_nv_index(ctx: &mut Context, index: u32) -> Result<Vec<u8>, tss_esapi::Error> {
+    tracing::debug!("Reading from TPM, nv index: {index}");
     let nv_tpm_handle = NvIndexTpmHandle::new(index)?;
     let buf = tss_esapi::abstraction::nv::read_full(ctx, NvAuth::Owner, nv_tpm_handle)?;
     Ok(buf.to_vec())

@@ -172,6 +172,7 @@ impl AttestationGenerator {
                 }
                 #[cfg(not(feature = "azure"))]
                 {
+                    tracing::error!("Attempted to generate an azure attestation but the `azure` feature not enabled");
                     Err(AttestationError::AttestationTypeNotSupported)
                 }
             }

@@ -29,7 +29,7 @@ struct AttestationDocument {
 struct TpmAttest {
     /// Attestation Key certificate from vTPM
     ak_certificate_pem: String,
-    /// vTPM quotes over the selected PCR bank(s).
+    /// vTPM quote
     quote: vtpm::Quote,
     /// Raw TCG event log bytes (UEFI + IMA) [currently not used]
     ///
@@ -68,6 +68,7 @@ pub async fn create_azure_attestation(input_data: [u8; 64]) -> Result<Vec<u8>, M
         tpm_attestation,
     };
 
+    tracing::info!("Successfully generated azure attestation: {attestation_document:?}");
     Ok(serde_json::to_vec(&attestation_document)?)
 }
 
@@ -94,6 +95,7 @@ async fn verify_azure_attestation_with_given_timestamp(
     now: u64,
 ) -> Result<super::measurements::Measurements, MaaError> {
     let attestation_document: AttestationDocument = serde_json::from_slice(&input)?;
+    tracing::info!("Attempting to verifiy azure attestation: {attestation_document:?}");
 
     let hcl_report_bytes = BASE64_URL_SAFE.decode(attestation_document.hcl_report_base64)?;
 
