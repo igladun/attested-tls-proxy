@@ -1,4 +1,5 @@
 pub mod attestation;
+pub mod file_server;
 
 pub use attestation::AttestationGenerator;
 use attestation::{measurements::Measurements, AttestationError, AttestationType};
