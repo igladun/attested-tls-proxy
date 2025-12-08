@@ -1,6 +1,7 @@
 use anyhow::{anyhow, ensure};
 use clap::{Parser, Subcommand};
 use std::{fs::File, net::SocketAddr, path::PathBuf};
+use tokio::io::AsyncWriteExt;
 use tokio_rustls::rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use tracing::level_filters::LevelFilter;
 
@@ -328,7 +329,7 @@ async fn main() -> anyhow::Result<()> {
                 None => None,
             };
 
-            let response = attested_get(
+            let mut response = attested_get(
                 target_addr,
                 &url_path.unwrap_or_default(),
                 attestation_verifier,
@@ -336,9 +337,14 @@ async fn main() -> anyhow::Result<()> {
             )
             .await?;
 
-            // TODO how to handle binary response
-            let text = response.text().await?;
-            println!("{text}");
+            // Write response body to standard output
+            let mut stdout = tokio::io::stdout();
+
+            while let Some(chunk) = response.chunk().await? {
+                stdout.write_all(&chunk).await?;
+            }
+
+            stdout.flush().await?;
         }
     }
 
