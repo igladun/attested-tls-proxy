@@ -1,4 +1,5 @@
 use anyhow::{anyhow, ensure};
+use axum::routing::head;
 use clap::{Parser, Subcommand};
 use std::{fs::File, net::SocketAddr, path::PathBuf};
 use tokio_rustls::rustls::pki_types::{CertificateDer, PrivateKeyDer};
@@ -121,6 +122,8 @@ enum CliCommand {
         #[arg(long)]
         dev_dummy_dcap: Option<String>,
     },
+    /// Start a proxy-client, send a single HTTP GET request to the given path and print the
+    /// response to standard output
     AttestedGet {
         /// The hostname:port or ip:port of the proxy server (port defaults to 443)
         target_addr: String,

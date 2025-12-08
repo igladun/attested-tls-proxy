@@ -1,6 +1,8 @@
 use crate::{AttestationGenerator, AttestationVerifier, ProxyClient, ProxyError};
 use tokio_rustls::rustls::pki_types::CertificateDer;
 
+/// Start a proxy-client, send a single HTTP GET request to the given path and return the
+/// [reqwest::Response]
 pub async fn attested_get(
     target_addr: String,
     url_path: &str,
