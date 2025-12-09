@@ -3,7 +3,7 @@ pub mod azure;
 pub mod dcap;
 pub mod measurements;
 
-use measurements::Measurements;
+use measurements::MultiMeasurements;
 use parity_scale_codec::{Decode, Encode};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -241,7 +241,7 @@ impl AttestationVerifier {
         &self,
         attestation_exchange_message: AttestationExchangeMessage,
         expected_input_data: [u8; 64],
-    ) -> Result<Option<Measurements>, AttestationError> {
+    ) -> Result<Option<MultiMeasurements>, AttestationError> {
         let attestation_type = attestation_exchange_message.attestation_type;
         tracing::debug!("Verifing {attestation_type} attestation");
 

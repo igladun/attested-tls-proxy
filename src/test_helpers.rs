@@ -1,5 +1,6 @@
 use axum::response::IntoResponse;
 use std::{
+    collections::HashMap,
     net::{IpAddr, SocketAddr},
     sync::Arc,
 };
@@ -12,7 +13,7 @@ use tokio_rustls::rustls::{
 };
 
 use crate::{
-    attestation::measurements::{CvmImageMeasurements, Measurements, PlatformMeasurements},
+    attestation::measurements::{DcapMeasurementRegister, MultiMeasurements},
     MEASUREMENT_HEADER, SUPPORTED_ALPN_PROTOCOL_VERSIONS,
 };
 
@@ -169,16 +170,12 @@ pub async fn example_service() -> SocketAddr {
     addr
 }
 
-pub fn default_measurements() -> Measurements {
-    Measurements {
-        platform: PlatformMeasurements {
-            mrtd: [0u8; 48],
-            rtmr0: [0u8; 48],
-        },
-        cvm_image: CvmImageMeasurements {
-            rtmr1: [0u8; 48],
-            rtmr2: [0u8; 48],
-            rtmr3: [0u8; 48],
-        },
-    }
+pub fn default_dcap_measurements() -> MultiMeasurements {
+    MultiMeasurements::Dcap(HashMap::from([
+        (DcapMeasurementRegister::MRTD, [0u8; 48]),
+        (DcapMeasurementRegister::RTMR0, [0u8; 48]),
+        (DcapMeasurementRegister::RTMR1, [0u8; 48]),
+        (DcapMeasurementRegister::RTMR2, [0u8; 48]),
+        (DcapMeasurementRegister::RTMR3, [0u8; 48]),
+    ]))
 }

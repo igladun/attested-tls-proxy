@@ -1,8 +1,5 @@
 //! Data Center Attestation Primitives (DCAP) evidence generation and verification
-use crate::attestation::{
-    measurements::{CvmImageMeasurements, Measurements, PlatformMeasurements},
-    AttestationError,
-};
+use crate::attestation::{measurements::MultiMeasurements, AttestationError};
 
 use configfs_tsm::QuoteGenerationError;
 use dcap_qvl::{
@@ -26,8 +23,8 @@ pub async fn verify_dcap_attestation(
     input: Vec<u8>,
     expected_input_data: [u8; 64],
     pccs_url: Option<String>,
-) -> Result<Measurements, DcapVerificationError> {
-    let (platform_measurements, image_measurements) = if cfg!(not(test)) {
+) -> Result<MultiMeasurements, DcapVerificationError> {
+    let measurements = if cfg!(not(test)) {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)?
             .as_secs();
@@ -46,10 +43,8 @@ pub async fn verify_dcap_attestation(
 
         let _verified_report = dcap_qvl::verify::verify(&input, &collateral, now)?;
 
-        let measurements = (
-            PlatformMeasurements::from_dcap_qvl_quote(&quote)?,
-            CvmImageMeasurements::from_dcap_qvl_quote(&quote)?,
-        );
+        let measurements = MultiMeasurements::from_dcap_qvl_quote(&quote)?;
+
         if get_quote_input_data(quote.report) != expected_input_data {
             return Err(DcapVerificationError::InputMismatch);
         }
@@ -61,16 +56,10 @@ pub async fn verify_dcap_attestation(
             return Err(DcapVerificationError::InputMismatch);
         }
 
-        (
-            PlatformMeasurements::from_tdx_quote(&quote),
-            CvmImageMeasurements::from_tdx_quote(&quote),
-        )
+        MultiMeasurements::from_tdx_quote(&quote)
     };
 
-    Ok(Measurements {
-        platform: platform_measurements,
-        cvm_image: image_measurements,
-    })
+    Ok(measurements)
 }
 
 /// Create a mock quote for testing on non-confidential hardware
