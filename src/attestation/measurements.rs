@@ -7,6 +7,7 @@ use http::{header::InvalidHeaderValue, HeaderValue};
 use serde::Deserialize;
 use thiserror::Error;
 
+/// Represents the measurement register types in a TDX quote
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[repr(u8)]
 pub enum DcapMeasurementRegister {
@@ -18,7 +19,7 @@ pub enum DcapMeasurementRegister {
 }
 
 impl TryFrom<u8> for DcapMeasurementRegister {
-    type Error = ();
+    type Error = MeasurementFormatError;
 
     fn try_from(value: u8) -> Result<Self, Self::Error> {
         match value {
@@ -27,11 +28,12 @@ impl TryFrom<u8> for DcapMeasurementRegister {
             2 => Ok(Self::RTMR1),
             3 => Ok(Self::RTMR2),
             4 => Ok(Self::RTMR3),
-            _ => Err(()),
+            _ => Err(MeasurementFormatError::BadRegisterIndex),
         }
     }
 }
 
+/// Represents a set of measurements values for one of the supported CVM platforms
 #[derive(Debug, Clone, PartialEq)]
 pub enum MultiMeasurements {
     Dcap(HashMap<DcapMeasurementRegister, [u8; 48]>),
@@ -86,7 +88,7 @@ impl MultiMeasurements {
                     .into_iter()
                     .map(|(k, v)| {
                         Ok((
-                            k.try_into().unwrap(),
+                            k.try_into()?,
                             hex::decode(v)?
                                 .try_into()
                                 .map_err(|_| MeasurementFormatError::BadLength)?,
@@ -155,6 +157,8 @@ pub enum MeasurementFormatError {
     Hex(#[from] hex::FromHexError),
     #[error("Expected 48 byte value")]
     BadLength,
+    #[error("TDX quote register index must be in the ranger 0-3")]
+    BadRegisterIndex,
 }
 
 /// An accepted measurement value given in the measurements file
