@@ -375,6 +375,8 @@ impl MeasurementPolicy {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
     use crate::test_helpers::default_dcap_measurements;
 
     use super::*;
@@ -386,8 +388,26 @@ mod tests {
                 .await
                 .unwrap();
 
-        assert_eq!(specific_measurements.accepted_measurements.len(), 1);
+        assert_eq!(specific_measurements.accepted_measurements.len(), 3);
+
         let m = &specific_measurements.accepted_measurements[0];
+        if let MultiMeasurements::Azure(a) = &m.measurements {
+            assert_eq!(
+                a.keys().collect::<HashSet<_>>(),
+                HashSet::from([&9, &4, &11])
+            );
+        } else {
+            panic!("Unexpected measurement type");
+        }
+
+        let m = &specific_measurements.accepted_measurements[1];
+        if let MultiMeasurements::Azure(a) = &m.measurements {
+            assert_eq!(a.keys().collect::<HashSet<_>>(), HashSet::from([&9, &4]));
+        } else {
+            panic!("Unexpected measurement type");
+        }
+
+        let m = &specific_measurements.accepted_measurements[2];
         if let MultiMeasurements::Dcap(d) = &m.measurements {
             assert!(d.contains_key(&DcapMeasurementRegister::MRTD));
             assert!(d.contains_key(&DcapMeasurementRegister::RTMR0));
