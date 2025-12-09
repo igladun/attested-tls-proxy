@@ -130,7 +130,7 @@ impl MultiMeasurements {
 
     pub fn from_pcrs<'a>(pcrs: impl Iterator<Item = &'a [u8; 32]>) -> Self {
         Self::Azure(
-            pcrs.map(|p| p.clone())
+            pcrs.copied()
                 .enumerate()
                 .map(|(index, value)| (index as u32, value))
                 .collect(),
@@ -261,16 +261,16 @@ impl MeasurementPolicy {
                         }
                         return true;
                     }
-                    return false;
+                    false
                 }
                 MultiMeasurements::Azure(azure_measurements) => {
                     if let MultiMeasurements::Azure(a) = measurement_record.measurements.clone() {
                         for (k, v) in azure_measurements.iter() {
                             if a.get(k).is_some_and(|x| x != v) {
-                                false;
+                                return false;
                             }
                         }
-                        true;
+                        return true;
                     }
                     false
                 }
