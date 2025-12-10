@@ -66,6 +66,23 @@ impl AttestationType {
             AttestationType::DcapTdx => "dcap-tdx",
         }
     }
+
+    /// Detect what platform we are on by attempting an attestation
+    pub async fn detect() -> Self {
+        // First attempt azure, if the feature is present
+        #[cfg(feature = "azure")]
+        {
+            if azure::create_azure_attestation([0; 64]).await.is_ok() {
+                return AttestationType::AzureTdx;
+            }
+        }
+        // Otherwise try DCAP quote - this internally checks that the quote provider is `tdx_guest`
+        if configfs_tsm::create_tdx_quote([0; 64]).is_ok() {
+            // TODO Possibly also check if it looks like we are on GCP (eg: hit metadata API)
+            return AttestationType::DcapTdx;
+        }
+        AttestationType::None
+    }
 }
 
 /// SCALE encode (used over the wire)
@@ -99,6 +116,25 @@ pub struct AttestationGenerator {
 }
 
 impl AttestationGenerator {
+    /// Create an [AttestationGenerator] detecting the attestation type if it is specified as 'auto'
+    pub async fn new_with_detection(
+        attestation_type_string: Option<String>,
+        dummy_dcap_url: Option<String>,
+    ) -> Result<Self, AttestationError> {
+        let attestaton_type = if attestation_type_string.as_deref() == Some("auto") {
+            tracing::info!("Doing attestation type detection...");
+            AttestationType::detect().await
+        } else {
+            serde_json::from_value(serde_json::Value::String(
+                attestation_type_string.unwrap_or("none".to_string()),
+            ))
+            .unwrap()
+        };
+        tracing::info!("Local platform: {attestaton_type}");
+
+        Self::new(attestaton_type, dummy_dcap_url)
+    }
+
     pub fn new(
         attestation_type: AttestationType,
         dummy_dcap_url: Option<String>,
@@ -116,6 +152,8 @@ impl AttestationGenerator {
         }
     }
 
+    /// Create an [AttestationGenerator] without a given dummy DCAP url - meaning Dummy attestation
+    /// type will not be possible
     pub fn new_not_dummy(attestation_type: AttestationType) -> Result<Self, AttestationError> {
         if attestation_type == AttestationType::Dummy {
             return Err(AttestationError::DummyUrl);
@@ -127,6 +165,7 @@ impl AttestationGenerator {
         })
     }
 
+    /// Create a dummy [AttestationGenerator]
     pub fn new_dummy(dummy_dcap_url: Option<String>) -> Result<Self, AttestationError> {
         match dummy_dcap_url {
             Some(url) => {
@@ -181,6 +220,9 @@ impl AttestationGenerator {
         }
     }
 
+    /// Generate a dummy attestaion by using an external service for the attestation generation
+    ///
+    /// This is for testing only
     async fn generate_dummy_attestation(
         &self,
         input_data: [u8; 64],
@@ -350,4 +392,15 @@ pub enum AttestationError {
     DummyUrl,
     #[error("Dummy server: {0}")]
     DummyServer(String),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn attestation_detection_does_not_panic() {
+        // We dont enforce what platform the test is run on, only that the function does not panic
+        let _ = AttestationGenerator::new_with_detection(Some("auto".to_string()), None).await;
+    }
 }
