@@ -121,14 +121,12 @@ impl AttestationGenerator {
         attestation_type_string: Option<String>,
         dummy_dcap_url: Option<String>,
     ) -> Result<Self, AttestationError> {
-        let attestaton_type = if attestation_type_string.as_deref() == Some("auto") {
+        let attestation_type_string = attestation_type_string.unwrap_or_else(|| "auto".to_string());
+        let attestaton_type = if attestation_type_string == "auto" {
             tracing::info!("Doing attestation type detection...");
             AttestationType::detect().await
         } else {
-            serde_json::from_value(serde_json::Value::String(
-                attestation_type_string.unwrap_or("none".to_string()),
-            ))
-            .unwrap()
+            serde_json::from_value(serde_json::Value::String(attestation_type_string))?
         };
         tracing::info!("Local platform: {attestaton_type}");
 
@@ -392,6 +390,8 @@ pub enum AttestationError {
     DummyUrl,
     #[error("Dummy server: {0}")]
     DummyServer(String),
+    #[error("JSON: {0}")]
+    SerdeJson(#[from] serde_json::Error),
 }
 
 #[cfg(test)]
@@ -401,6 +401,6 @@ mod tests {
     #[tokio::test]
     async fn attestation_detection_does_not_panic() {
         // We dont enforce what platform the test is run on, only that the function does not panic
-        let _ = AttestationGenerator::new_with_detection(Some("auto".to_string()), None).await;
+        let _ = AttestationGenerator::new_with_detection(None, None).await;
     }
 }
