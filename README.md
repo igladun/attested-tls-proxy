@@ -93,6 +93,7 @@ Header value: an attestation type given as a string as described below.
 
 These are the attestation type names used in the HTTP headers, and the measurements file, and when specifying a local attestation type with the `--client-attestation-type` or `--server-attestation-type` command line options.
 
+- `auto` - detect attestation type (used only when specifying the local attestation type as a command-line argument)
 - `none` - No attestation provided
 - `dummy` - Forwards the attestation to a remote service (for testing purposes, not yet supported)
 - `gcp-tdx` - DCAP TDX on Google Cloud Platform
@@ -138,7 +139,13 @@ Following a successful attestation exchange, the client can make HTTP requests u
 
 As described above, the server will inject measurement data into the request headers before forwarding them to the target service, and the client will inject measurement data into the response headers before forwarding them to the source client.
 
-### CLI differences from `cvm-reverse-proxy`
+## Dependencies and feature flags
+
+The `azure` feature, for Microsoft Azure attestation requires [tpm2](https://tpm2-software.github.io) to be installed. On Debian-based systems this is provided by [`libtss2-dev`](https://packages.debian.org/trixie/libtss2-dev), and on nix `tpm2-tss`.
+
+This feature is enabled by default. For non-azure deployments you can compile without this requirement by specifying `--no-default-features`. But note that this is will disabled both generation and verification of azure attestations.
+
+## CLI differences from `cvm-reverse-proxy`
 
 This aims to have a similar command line interface to `cvm-reverse-proxy` but there are some differences:
 
