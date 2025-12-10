@@ -6,7 +6,7 @@ use tracing::level_filters::LevelFilter;
 
 use attested_tls_proxy::{
     attestation::{measurements::MeasurementPolicy, AttestationType, AttestationVerifier},
-    get_tls_cert, ProxyClient, ProxyServer, TlsCertAndKey,
+    get_tls_cert, AttestationGenerator, ProxyClient, ProxyServer, TlsCertAndKey,
 };
 
 #[derive(Parser, Debug, Clone)]
@@ -15,21 +15,10 @@ struct Cli {
     #[clap(subcommand)]
     command: CliCommand,
     /// Optional path to file containing JSON measurements to be enforced on the remote party
-    #[arg(
-        long,
-        global = true,
-        required_unless_present = "allowed_remote_attestation_type",
-        conflicts_with = "allowed_remote_attestation_type",
-        env = "MEASUREMENTS_FILE"
-    )]
+    #[arg(long, global = true, env = "MEASUREMENTS_FILE")]
     measurements_file: Option<PathBuf>,
     /// If no measurements file is specified, a single attestion type to allow
-    #[arg(
-        long,
-        global = true,
-        required_unless_present = "measurements_file",
-        conflicts_with = "measurements_file"
-    )]
+    #[arg(long, global = true)]
     allowed_remote_attestation_type: Option<String>,
     /// The URL of a PCCS to use when verifying DCAP attestations. Defaults to Intel PCS.
     #[arg(long, global = true)]
@@ -67,10 +56,10 @@ enum CliCommand {
         /// Additional CA certificate to verify against (PEM) Defaults to no additional TLS certs.
         #[arg(long)]
         tls_ca_certificate: Option<PathBuf>,
-        // TODO missing:
-        // Name:    "dev-dummy-dcap",
-        // EnvVars: []string{"DEV_DUMMY_DCAP"},
-        // Usage:   "URL of the remote dummy DCAP service. Only with --client-attestation-type dummy.",
+        /// URL of the remote dummy attestation service. Only use with --client-attestation-type
+        /// dummy
+        #[arg(long)]
+        dev_dummy_dcap: Option<String>,
     },
     /// Run a proxy server
     Server {
@@ -93,15 +82,15 @@ enum CliCommand {
         /// enabled.
         #[arg(long)]
         client_auth: bool,
+        /// URL of the remote dummy attestation service. Only use with --server-attestation-type
+        /// dummy
+        #[arg(long)]
+        dev_dummy_dcap: Option<String>,
         // TODO missing:
         // Name:    "listen-addr-healthcheck",
         // EnvVars: []string{"LISTEN_ADDR_HEALTHCHECK"},
         // Value:   "",
         // Usage:   "address to listen on for health checks",
-        //
-        // Name:    "dev-dummy-dcap",
-        // EnvVars: []string{"DEV_DUMMY_DCAP"},
-        // Usage:   "URL of the remote dummy DCAP service. Only with --server-attestation-type dummy.",
     },
     /// Retrieve the attested TLS certificate from a proxy server
     GetTlsCert {
@@ -113,6 +102,11 @@ enum CliCommand {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
+
+    ensure!(
+        cli.allowed_remote_attestation_type.is_some() != cli.measurements_file.is_some(),
+        "Exactly one of --measurements-file or --allowed-remote-attestation-type must be provided"
+    );
 
     let crate_name = env!("CARGO_PKG_NAME");
 
@@ -161,6 +155,7 @@ async fn main() -> anyhow::Result<()> {
             tls_private_key_path,
             tls_certificate_path,
             tls_ca_certificate,
+            dev_dummy_dcap,
         } => {
             let target_addr = target_addr
                 .strip_prefix("https://")
@@ -195,7 +190,8 @@ async fn main() -> anyhow::Result<()> {
                 None => None,
             };
 
-            let client_attestation_generator = client_attestation_type.get_quote_generator()?;
+            let client_attestation_generator =
+                AttestationGenerator::new(client_attestation_type, dev_dummy_dcap)?;
 
             let client = ProxyClient::new(
                 tls_cert_and_chain,
@@ -220,6 +216,7 @@ async fn main() -> anyhow::Result<()> {
             tls_certificate_path,
             client_auth,
             server_attestation_type,
+            dev_dummy_dcap,
         } => {
             let tls_cert_and_chain =
                 load_tls_cert_and_key(tls_certificate_path, tls_private_key_path)?;
@@ -228,7 +225,8 @@ async fn main() -> anyhow::Result<()> {
                 serde_json::Value::String(server_attestation_type.unwrap_or("none".to_string())),
             )?;
 
-            let local_attestation_generator = server_attestation_type.get_quote_generator()?;
+            let local_attestation_generator =
+                AttestationGenerator::new(server_attestation_type, dev_dummy_dcap)?;
 
             let server = ProxyServer::new(
                 tls_cert_and_chain,
