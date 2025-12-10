@@ -3,7 +3,7 @@ pub mod attested_get;
 pub mod file_server;
 
 pub use attestation::AttestationGenerator;
-use attestation::{measurements::Measurements, AttestationError, AttestationType};
+use attestation::{measurements::MultiMeasurements, AttestationError, AttestationType};
 use bytes::Bytes;
 use http::HeaderValue;
 use http_body_util::{combinators::BoxBody, BodyExt};
@@ -557,7 +557,7 @@ impl ProxyClient {
         cert_chain: Option<Vec<CertificateDer<'static>>>,
         attestation_generator: AttestationGenerator,
         attestation_verifier: AttestationVerifier,
-    ) -> (Http2Sender, Option<Measurements>, AttestationType) {
+    ) -> (Http2Sender, Option<MultiMeasurements>, AttestationType) {
         let mut delay = Duration::from_secs(1);
         let max_delay = Duration::from_secs(SERVER_RECONNECT_MAX_BACKOFF_SECS);
 
@@ -592,7 +592,7 @@ impl ProxyClient {
         cert_chain: Option<Vec<CertificateDer<'static>>>,
         attestation_generator: AttestationGenerator,
         attestation_verifier: AttestationVerifier,
-    ) -> Result<(Http2Sender, Option<Measurements>, AttestationType), ProxyError> {
+    ) -> Result<(Http2Sender, Option<MultiMeasurements>, AttestationType), ProxyError> {
         // Make a TCP client connection and TLS handshake
         let out = TcpStream::connect(&target).await?;
         let mut tls_stream = connector
@@ -856,13 +856,13 @@ mod tests {
     use std::collections::HashMap;
 
     use crate::attestation::measurements::{
-        CvmImageMeasurements, MeasurementPolicy, MeasurementRecord, PlatformMeasurements,
+        DcapMeasurementRegister, MeasurementPolicy, MeasurementRecord, MultiMeasurements,
     };
 
     use super::*;
     use test_helpers::{
-        default_measurements, example_http_service, example_service, generate_certificate_chain,
-        generate_tls_config, generate_tls_config_with_client_auth,
+        example_http_service, generate_certificate_chain, generate_tls_config,
+        generate_tls_config_with_client_auth, mock_dcap_measurements,
     };
 
     // Server has mock DCAP, client has no attestation and no client auth
@@ -912,9 +912,6 @@ mod tests {
             .unwrap();
 
         let headers = res.headers();
-        let measurements_json = headers.get(MEASUREMENT_HEADER).unwrap().to_str().unwrap();
-        let measurements = Measurements::from_header_format(measurements_json).unwrap();
-        assert_eq!(measurements, default_measurements());
 
         let attestation_type = headers
             .get(ATTESTATION_TYPE_HEADER)
@@ -922,6 +919,12 @@ mod tests {
             .to_str()
             .unwrap();
         assert_eq!(attestation_type, AttestationType::DcapTdx.as_str());
+
+        let measurements_json = headers.get(MEASUREMENT_HEADER).unwrap().to_str().unwrap();
+        let measurements =
+            MultiMeasurements::from_header_format(measurements_json, AttestationType::DcapTdx)
+                .unwrap();
+        assert_eq!(measurements, mock_dcap_measurements());
 
         let res_body = res.text().await.unwrap();
         assert_eq!(res_body, "No measurements");
@@ -1003,8 +1006,9 @@ mod tests {
 
         // The response body shows us what was in the request header (as the test http server
         // handler puts them there)
-        let measurements = Measurements::from_header_format(&res_body).unwrap();
-        assert_eq!(measurements, default_measurements());
+        let measurements =
+            MultiMeasurements::from_header_format(&res_body, AttestationType::DcapTdx).unwrap();
+        assert_eq!(measurements, mock_dcap_measurements());
     }
 
     // Server has mock DCAP, client has mock DCAP and client auth
@@ -1070,8 +1074,10 @@ mod tests {
 
         let headers = res.headers();
         let measurements_json = headers.get(MEASUREMENT_HEADER).unwrap().to_str().unwrap();
-        let measurements = Measurements::from_header_format(measurements_json).unwrap();
-        assert_eq!(measurements, default_measurements());
+        let measurements =
+            MultiMeasurements::from_header_format(measurements_json, AttestationType::DcapTdx)
+                .unwrap();
+        assert_eq!(measurements, mock_dcap_measurements());
 
         let attestation_type = headers
             .get(ATTESTATION_TYPE_HEADER)
@@ -1084,8 +1090,9 @@ mod tests {
 
         // The response body shows us what was in the request header (as the test http server
         // handler puts them there)
-        let measurements = Measurements::from_header_format(&res_body).unwrap();
-        assert_eq!(measurements, default_measurements());
+        let measurements =
+            MultiMeasurements::from_header_format(&res_body, AttestationType::DcapTdx).unwrap();
+        assert_eq!(measurements, mock_dcap_measurements());
 
         // Now do another request - to check that the connection has stayed open
         let res = reqwest::get(format!("http://{}", proxy_client_addr.to_string()))
@@ -1094,8 +1101,10 @@ mod tests {
 
         let headers = res.headers();
         let measurements_json = headers.get(MEASUREMENT_HEADER).unwrap().to_str().unwrap();
-        let measurements = Measurements::from_header_format(measurements_json).unwrap();
-        assert_eq!(measurements, default_measurements());
+        let measurements =
+            MultiMeasurements::from_header_format(measurements_json, AttestationType::DcapTdx)
+                .unwrap();
+        assert_eq!(measurements, mock_dcap_measurements());
 
         let attestation_type = headers
             .get(ATTESTATION_TYPE_HEADER)
@@ -1108,14 +1117,15 @@ mod tests {
 
         // The response body shows us what was in the request header (as the test http server
         // handler puts them there)
-        let measurements = Measurements::from_header_format(&res_body).unwrap();
-        assert_eq!(measurements, default_measurements());
+        let measurements =
+            MultiMeasurements::from_header_format(&res_body, AttestationType::DcapTdx).unwrap();
+        assert_eq!(measurements, mock_dcap_measurements());
     }
 
     // Server has mock DCAP, client no attestation - just get the server certificate
     #[tokio::test]
     async fn test_get_tls_cert() {
-        let target_addr = example_service().await;
+        let target_addr = example_http_service().await;
 
         let (cert_chain, private_key) = generate_certificate_chain("127.0.0.1".parse().unwrap());
         let (server_config, client_config) = generate_tls_config(cert_chain.clone(), private_key);
@@ -1218,23 +1228,16 @@ mod tests {
 
         let attestation_verifier = AttestationVerifier {
             measurement_policy: MeasurementPolicy {
-                accepted_measurements: HashMap::from([(
-                    AttestationType::DcapTdx,
-                    Some(vec![MeasurementRecord {
-                        measurement_id: "test".to_string(),
-                        measurements: Measurements {
-                            platform: PlatformMeasurements {
-                                mrtd: [0; 48],
-                                rtmr0: [0; 48],
-                            },
-                            cvm_image: CvmImageMeasurements {
-                                rtmr1: [1; 48], // This differs from the mock measurements given
-                                rtmr2: [0; 48],
-                                rtmr3: [0; 48],
-                            },
-                        },
-                    }]),
-                )]),
+                accepted_measurements: vec![MeasurementRecord {
+                    measurement_id: "test".to_string(),
+                    measurements: MultiMeasurements::Dcap(HashMap::from([
+                        (DcapMeasurementRegister::MRTD, [0; 48]),
+                        (DcapMeasurementRegister::RTMR0, [0; 48]),
+                        (DcapMeasurementRegister::RTMR1, [1; 48]), // This differs from the mock measurements
+                        (DcapMeasurementRegister::RTMR2, [0; 48]),
+                        (DcapMeasurementRegister::RTMR3, [0; 48]),
+                    ])),
+                }],
             },
             pccs_url: None,
             log_dcap_quote: false,

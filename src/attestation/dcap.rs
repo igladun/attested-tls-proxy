@@ -1,21 +1,21 @@
 //! Data Center Attestation Primitives (DCAP) evidence generation and verification
-use crate::attestation::{
-    measurements::{CvmImageMeasurements, Measurements, PlatformMeasurements},
-    AttestationError,
-};
+use crate::attestation::{measurements::MultiMeasurements, AttestationError};
 
 use configfs_tsm::QuoteGenerationError;
 use dcap_qvl::{
     collateral::get_collateral_for_fmspc,
     quote::{Quote, Report},
 };
+use thiserror::Error;
 
 /// For fetching collateral directly from Intel, if no PCCS is specified
 pub const PCS_URL: &str = "https://api.trustedservices.intel.com";
 
 /// Quote generation using configfs_tsm
 pub async fn create_dcap_attestation(input_data: [u8; 64]) -> Result<Vec<u8>, AttestationError> {
-    Ok(generate_quote(input_data)?)
+    let quote = generate_quote(input_data)?;
+    tracing::info!("Generated TDX quote of {} bytes", quote.len());
+    Ok(quote)
 }
 
 /// Verify a DCAP TDX quote, and return the measurement values
@@ -23,12 +23,13 @@ pub async fn verify_dcap_attestation(
     input: Vec<u8>,
     expected_input_data: [u8; 64],
     pccs_url: Option<String>,
-) -> Result<Measurements, AttestationError> {
-    let (platform_measurements, image_measurements) = if cfg!(not(test)) {
+) -> Result<MultiMeasurements, DcapVerificationError> {
+    let measurements = if cfg!(not(test)) {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)?
             .as_secs();
         let quote = Quote::parse(&input)?;
+        tracing::info!("Verifying DCAP attestation: {quote:?}");
 
         let ca = quote.ca()?;
         let fmspc = hex::encode_upper(quote.fmspc()?);
@@ -42,31 +43,23 @@ pub async fn verify_dcap_attestation(
 
         let _verified_report = dcap_qvl::verify::verify(&input, &collateral, now)?;
 
-        let measurements = (
-            PlatformMeasurements::from_dcap_qvl_quote(&quote)?,
-            CvmImageMeasurements::from_dcap_qvl_quote(&quote)?,
-        );
+        let measurements = MultiMeasurements::from_dcap_qvl_quote(&quote)?;
+
         if get_quote_input_data(quote.report) != expected_input_data {
-            return Err(AttestationError::InputMismatch);
+            return Err(DcapVerificationError::InputMismatch);
         }
         measurements
     } else {
         // In tests we use mock quotes which will fail to verify
         let quote = tdx_quote::Quote::from_bytes(&input)?;
         if quote.report_input_data() != expected_input_data {
-            return Err(AttestationError::InputMismatch);
+            return Err(DcapVerificationError::InputMismatch);
         }
 
-        (
-            PlatformMeasurements::from_tdx_quote(&quote),
-            CvmImageMeasurements::from_tdx_quote(&quote),
-        )
+        MultiMeasurements::from_tdx_quote(&quote)
     };
 
-    Ok(Measurements {
-        platform: platform_measurements,
-        cvm_image: image_measurements,
-    })
+    Ok(measurements)
 }
 
 /// Create a mock quote for testing on non-confidential hardware
@@ -96,4 +89,19 @@ pub fn get_quote_input_data(report: Report) -> [u8; 64] {
         Report::TD15(r) => r.base.report_data,
         Report::SgxEnclave(r) => r.report_data,
     }
+}
+
+/// An error when verifying a DCAP attestation
+#[derive(Error, Debug)]
+pub enum DcapVerificationError {
+    #[error("Quote input is not as expected")]
+    InputMismatch,
+    #[error("SGX quote given when TDX quote expected")]
+    SgxNotSupported,
+    #[error("System Time: {0}")]
+    SystemTime(#[from] std::time::SystemTimeError),
+    #[error("DCAP quote verification: {0}")]
+    DcapQvl(#[from] anyhow::Error),
+    #[error("Quote parse: {0}")]
+    QuoteParse(#[from] tdx_quote::QuoteParseError),
 }
