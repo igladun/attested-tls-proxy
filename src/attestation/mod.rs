@@ -8,12 +8,15 @@ use parity_scale_codec::{Decode, Encode};
 use serde::{Deserialize, Serialize};
 use std::{
     fmt::{self, Display, Formatter},
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use thiserror::Error;
 
 use crate::attestation::{dcap::DcapVerificationError, measurements::MeasurementPolicy};
+
+const GCP_METADATA_API: &str =
+    "http://metadata.google.internal/computeMetadata/v1/project/project-id";
 
 /// This is the type sent over the channel to provide an attestation
 #[derive(Clone, Debug, Serialize, Deserialize, Encode, Decode)]
@@ -68,20 +71,23 @@ impl AttestationType {
     }
 
     /// Detect what platform we are on by attempting an attestation
-    pub async fn detect() -> Self {
+    pub async fn detect() -> Result<Self, AttestationError> {
         // First attempt azure, if the feature is present
         #[cfg(feature = "azure")]
         {
             if azure::create_azure_attestation([0; 64]).await.is_ok() {
-                return AttestationType::AzureTdx;
+                return Ok(AttestationType::AzureTdx);
             }
         }
         // Otherwise try DCAP quote - this internally checks that the quote provider is `tdx_guest`
         if configfs_tsm::create_tdx_quote([0; 64]).is_ok() {
-            // TODO Possibly also check if it looks like we are on GCP (eg: hit metadata API)
-            return AttestationType::DcapTdx;
+            if running_on_gcp().await? {
+                return Ok(AttestationType::GcpTdx);
+            } else {
+                return Ok(AttestationType::DcapTdx);
+            }
         }
-        AttestationType::None
+        Ok(AttestationType::None)
     }
 }
 
@@ -124,7 +130,7 @@ impl AttestationGenerator {
         let attestation_type_string = attestation_type_string.unwrap_or_else(|| "auto".to_string());
         let attestaton_type = if attestation_type_string == "auto" {
             tracing::info!("Doing attestation type detection...");
-            AttestationType::detect().await
+            AttestationType::detect().await?
         } else {
             serde_json::from_value(serde_json::Value::String(attestation_type_string))?
         };
@@ -362,6 +368,32 @@ async fn log_attestation(attestation: &AttestationExchangeMessage) {
     }
 }
 
+/// Test whether it looks like we are running on GCP by hitting the metadata API
+async fn running_on_gcp() -> Result<bool, AttestationError> {
+    let mut headers = reqwest::header::HeaderMap::new();
+    headers.insert(
+        "Metadata-Flavor",
+        "Google".parse().expect("Cannot parse header"),
+    );
+
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_millis(200))
+        .default_headers(headers)
+        .build()?;
+
+    let resp = client.get(GCP_METADATA_API).send().await;
+
+    if let Ok(r) = resp {
+        return Ok(r.status().is_success()
+            && r.headers()
+                .get("Metadata-Flavor")
+                .map(|v| v == "Google")
+                .unwrap_or(false));
+    }
+
+    Ok(false)
+}
+
 /// An error when generating or verifying an attestation
 #[derive(Error, Debug)]
 pub enum AttestationError {
@@ -392,6 +424,8 @@ pub enum AttestationError {
     DummyServer(String),
     #[error("JSON: {0}")]
     SerdeJson(#[from] serde_json::Error),
+    #[error("HTTP client: {0}")]
+    Reqwest(#[from] reqwest::Error),
 }
 
 #[cfg(test)]
@@ -402,5 +436,10 @@ mod tests {
     async fn attestation_detection_does_not_panic() {
         // We dont enforce what platform the test is run on, only that the function does not panic
         let _ = AttestationGenerator::new_with_detection(None, None).await;
+    }
+
+    #[tokio::test]
+    async fn running_on_gcp_check_does_not_panic() {
+        let _ = running_on_gcp().await;
     }
 }
