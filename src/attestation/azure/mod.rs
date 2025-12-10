@@ -299,6 +299,8 @@ pub enum MaaError {
 
 #[cfg(test)]
 mod tests {
+    use crate::attestation::measurements::MeasurementPolicy;
+
     use super::*;
 
     #[tokio::test]
@@ -329,7 +331,29 @@ mod tests {
         // timestamp
         let now = 1764621240;
 
-        verify_azure_attestation_with_given_timestamp(
+        let measurements_json = br#"
+        [{
+            "measurement_id": "cvm-image-azure-tdx.rootfs-20241107200854.wic.vhd",
+            "attestation_type": "azure-tdx",
+            "measurements": {
+                "4": {
+                    "expected": "c4a25a6d7704629f63db84d20ea8db0e9ce002b2801be9a340091fe7ac588699"
+                },
+                "9": {
+                    "expected": "9f4a5775122ca4703e135a9ae6041edead0064262e399df11ca85182b0f1541d"
+                },
+                "11": {
+                    "expected": "abd7c695ffdb6081e99636ee016d1322919c68d049b698b399d22ae215a121bf"
+                }
+            }
+        }]
+        "#;
+
+        let measurement_policy = MeasurementPolicy::from_json_bytes(measurements_json.to_vec())
+            .await
+            .unwrap();
+
+        let measurements = verify_azure_attestation_with_given_timestamp(
             attestation_bytes.to_vec(),
             [0; 64], // Input data
             None,
@@ -337,5 +361,7 @@ mod tests {
         )
         .await
         .unwrap();
+
+        measurement_policy.check_measurement(&measurements).unwrap();
     }
 }

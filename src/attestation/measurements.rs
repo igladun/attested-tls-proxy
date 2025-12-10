@@ -337,8 +337,14 @@ impl MeasurementPolicy {
                         let azure_measurements = measurements
                             .into_iter()
                             .map(|(index, entry)| {
+                                let index = index.parse()?;
+
+                                if index > 23 {
+                                    return Err(MeasurementFormatError::BadRegisterIndex);
+                                }
+
                                 Ok((
-                                    index.parse()?,
+                                    index,
                                     hex::decode(entry.expected)?
                                         .try_into()
                                         .map_err(|_| MeasurementFormatError::BadLength)?,
