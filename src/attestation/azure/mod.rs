@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use x509_parser::prelude::*;
 
-use crate::attestation::dcap::verify_dcap_attestation;
+use crate::attestation::{dcap::verify_dcap_attestation, measurements::MultiMeasurements};
 
 /// The attestation evidence payload that gets sent over the channel
 #[derive(Debug, Serialize, Deserialize)]
@@ -77,7 +77,7 @@ pub async fn verify_azure_attestation(
     input: Vec<u8>,
     expected_input_data: [u8; 64],
     pccs_url: Option<String>,
-) -> Result<super::measurements::Measurements, MaaError> {
+) -> Result<super::measurements::MultiMeasurements, MaaError> {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .expect("Time went backwards")
@@ -93,7 +93,7 @@ async fn verify_azure_attestation_with_given_timestamp(
     expected_input_data: [u8; 64],
     pccs_url: Option<String>,
     now: u64,
-) -> Result<super::measurements::Measurements, MaaError> {
+) -> Result<super::measurements::MultiMeasurements, MaaError> {
     let attestation_document: AttestationDocument = serde_json::from_slice(&input)?;
     tracing::info!("Attempting to verifiy azure attestation: {attestation_document:?}");
 
@@ -108,7 +108,7 @@ async fn verify_azure_attestation_with_given_timestamp(
 
     // Do DCAP verification
     let tdx_quote_bytes = BASE64_URL_SAFE.decode(attestation_document.tdx_quote_base64)?;
-    let measurements =
+    let _dcap_measurements =
         verify_dcap_attestation(tdx_quote_bytes, expected_tdx_input_data, pccs_url).await?;
 
     let hcl_ak_pub = hcl_report.ak_pub()?;
@@ -142,7 +142,7 @@ async fn verify_azure_attestation_with_given_timestamp(
     let pub_key = PKey::public_key_from_der(&hcl_ak_pub_der)?;
     vtpm_quote.verify(&pub_key, &expected_input_data[..32])?;
 
-    let _pcrs = vtpm_quote.pcrs_sha256();
+    let pcrs = vtpm_quote.pcrs_sha256();
 
     // Parse AK certificate
     let (_type_label, ak_certificate_der) = pem_rfc7468::decode_vec(
@@ -171,7 +171,7 @@ async fn verify_azure_attestation_with_given_timestamp(
     // Verify the AK certificate against microsoft root cert
     verify_ak_cert_with_azure_roots(ak_certificate_der_without_trailing_data, now)?;
 
-    Ok(measurements)
+    Ok(MultiMeasurements::from_pcrs(pcrs))
 }
 
 /// JSON Web Key used in [HclRuntimeClaims]
@@ -299,6 +299,8 @@ pub enum MaaError {
 
 #[cfg(test)]
 mod tests {
+    use crate::attestation::measurements::MeasurementPolicy;
+
     use super::*;
 
     #[tokio::test]
@@ -329,7 +331,29 @@ mod tests {
         // timestamp
         let now = 1764621240;
 
-        verify_azure_attestation_with_given_timestamp(
+        let measurements_json = br#"
+        [{
+            "measurement_id": "cvm-image-azure-tdx.rootfs-20241107200854.wic.vhd",
+            "attestation_type": "azure-tdx",
+            "measurements": {
+                "4": {
+                    "expected": "c4a25a6d7704629f63db84d20ea8db0e9ce002b2801be9a340091fe7ac588699"
+                },
+                "9": {
+                    "expected": "9f4a5775122ca4703e135a9ae6041edead0064262e399df11ca85182b0f1541d"
+                },
+                "11": {
+                    "expected": "abd7c695ffdb6081e99636ee016d1322919c68d049b698b399d22ae215a121bf"
+                }
+            }
+        }]
+        "#;
+
+        let measurement_policy = MeasurementPolicy::from_json_bytes(measurements_json.to_vec())
+            .await
+            .unwrap();
+
+        let measurements = verify_azure_attestation_with_given_timestamp(
             attestation_bytes.to_vec(),
             [0; 64], // Input data
             None,
@@ -337,5 +361,7 @@ mod tests {
         )
         .await
         .unwrap();
+
+        measurement_policy.check_measurement(&measurements).unwrap();
     }
 }
