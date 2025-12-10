@@ -143,7 +143,7 @@ As described above, the server will inject measurement data into the request hea
 
 The `azure` feature, for Microsoft Azure attestation requires [tpm2](https://tpm2-software.github.io) to be installed. On Debian-based systems this is provided by [`libtss2-dev`](https://packages.debian.org/trixie/libtss2-dev), and on nix `tpm2-tss`.
 
-This feature is enabled by default. For non-azure deployments you can compile without this requirement by specifying `--no-default-features`. But note that this is will disabled both generation and verification of azure attestations.
+This feature is enabled by default. For non-azure deployments you can compile without this requirement by specifying `--no-default-features`. But note that this is will disable both generation and verification of azure attestations.
 
 ## CLI differences from `cvm-reverse-proxy`
 
