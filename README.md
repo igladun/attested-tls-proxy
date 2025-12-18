@@ -151,7 +151,14 @@ This feature is enabled by default. For non-azure deployments you can compile wi
 This might help give an understanding of how it works.
 
 1. Make sure you have the tpm2 dependency (see above) - or compile with `--no-default-features`.
-2. Run the helper script `./scripts/generate-cert.sh` to generate a mock certifcate authority and a TLS certificate signed by it.
+2. Run the helper script to generate a mock certifcate authority and a TLS certificate for localhost signed by it.
+
+This requires `openssl` to be installed.
+ 
+```
+./scripts/generate-cert.sh localhost 127.0.0.1
+```
+
 3. Start a http server to try this out with, on 127.0.01:8000 `python3 -m http.server 8000`
 4. Start a proxy-server:
 
