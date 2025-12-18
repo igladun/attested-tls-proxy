@@ -189,6 +189,8 @@ impl ProxyServer {
         attestation_generator: AttestationGenerator,
         attestation_verifier: AttestationVerifier,
     ) -> Result<(), ProxyError> {
+        tracing::debug!("proxy-server accepted connection");
+
         // Do TLS handshake
         let mut tls_stream = acceptor.accept(inbound).await?;
         let (_io, connection) = tls_stream.get_ref();
@@ -524,6 +526,8 @@ impl ProxyClient {
         inbound: TcpStream,
         requests_tx: mpsc::Sender<RequestWithResponseSender>,
     ) -> Result<(), ProxyError> {
+        tracing::debug!("proxy-client accepted connection");
+
         // Setup http server and handler
         let http = hyper::server::conn::http1::Builder::new();
         let service = service_fn(move |req| {
@@ -688,11 +692,28 @@ impl ProxyClient {
 pub async fn get_tls_cert(
     server_name: String,
     attestation_verifier: AttestationVerifier,
+    remote_certificate: Option<CertificateDer<'_>>,
 ) -> Result<Vec<CertificateDer<'static>>, ProxyError> {
-    let root_store = RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-    let client_config = ClientConfig::builder()
+    tracing::debug!("Getting remote TLS cert");
+    // If a remote CA cert was given, use it as the root store, otherwise use webpki_roots
+    let root_store = match remote_certificate {
+        Some(remote_certificate) => {
+            let mut root_store = RootCertStore::empty();
+            root_store.add(remote_certificate)?;
+            root_store
+        }
+        None => RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned()),
+    };
+
+    let mut client_config = ClientConfig::builder()
         .with_root_certificates(root_store)
         .with_no_client_auth();
+
+    client_config.alpn_protocols = SUPPORTED_ALPN_PROTOCOL_VERSIONS
+        .into_iter()
+        .map(|p| p.to_vec())
+        .collect();
+
     get_tls_cert_with_config(server_name, attestation_verifier, client_config.into()).await
 }
 
@@ -736,6 +757,8 @@ async fn get_tls_cert_with_config(
     let _measurements = attestation_verifier
         .verify_attestation(remote_attestation_message, remote_input_data)
         .await?;
+
+    tls_stream.shutdown().await?;
 
     Ok(remote_cert_chain)
 }
