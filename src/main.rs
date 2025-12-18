@@ -78,7 +78,7 @@ enum CliCommand {
         /// The path to a PEM encoded private key
         #[arg(long, env = "TLS_PRIVATE_KEY_PATH")]
         tls_private_key_path: PathBuf,
-        /// The path to a PEM encoded certificate chain
+        /// Additional CA certificate to verify against (PEM) Defaults to no additional TLS certs.
         #[arg(long, env = "TLS_CERTIFICATE_PATH")]
         tls_certificate_path: PathBuf,
         /// Whether to use client authentication. If the client is running in a CVM this must be
@@ -99,6 +99,9 @@ enum CliCommand {
     GetTlsCert {
         /// The hostname:port or ip:port of the proxy server (port defaults to 443)
         server: String,
+        /// Additional CA certificate to verify against (PEM) Defaults to no additional TLS certs.
+        #[arg(long)]
+        tls_ca_certificate: Option<PathBuf>,
     },
     /// Serve a filesystem path over an attested channel
     AttestedFileServer {
@@ -114,7 +117,7 @@ enum CliCommand {
         /// The path to a PEM encoded private key
         #[arg(long, env = "TLS_PRIVATE_KEY_PATH")]
         tls_private_key_path: PathBuf,
-        /// The path to a PEM encoded certificate chain
+        /// Additional CA certificate to verify against (PEM) Defaults to no additional TLS certs.
         #[arg(long, env = "TLS_CERTIFICATE_PATH")]
         tls_certificate_path: PathBuf,
         /// URL of the remote dummy attestation service. Only use with --server-attestation-type
@@ -145,7 +148,7 @@ async fn main() -> anyhow::Result<()> {
         "Exactly one of --measurements-file or --allowed-remote-attestation-type must be provided"
     );
 
-    let crate_name = env!("CARGO_PKG_NAME");
+    let crate_name = env!("CARGO_CRATE_NAME");
 
     let env_filter = tracing_subscriber::EnvFilter::builder()
         .with_default_directive(LevelFilter::WARN.into()) // global default
@@ -281,8 +284,20 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
         }
-        CliCommand::GetTlsCert { server } => {
-            let cert_chain = get_tls_cert(server, attestation_verifier).await?;
+        CliCommand::GetTlsCert {
+            server,
+            tls_ca_certificate,
+        } => {
+            let remote_tls_cert = match tls_ca_certificate {
+                Some(remote_cert_filename) => Some(
+                    load_certs_pem(remote_cert_filename)?
+                        .first()
+                        .ok_or(anyhow!("Filename given but no ceritificates found"))?
+                        .clone(),
+                ),
+                None => None,
+            };
+            let cert_chain = get_tls_cert(server, attestation_verifier, remote_tls_cert).await?;
             println!("{}", certs_to_pem_string(&cert_chain)?);
         }
         CliCommand::AttestedFileServer {
